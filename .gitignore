@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment variables
+.env
+.env.local
+
+# ChromaDB persistent data
+*.chroma/
+chroma/
+
+# Node
+node_modules/
+web/frontend/dist/
+
+# Test / scratch
+rb_test/
+examples/
+测试/
+
+# Dev helper scripts (root level)
+_gen.py
+_gen_vue.py
+_write_vue.py
+_codex_tmpl_b64.txt
+
+# ZCode plans
+.zcode/

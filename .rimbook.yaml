@@ -1,0 +1,9 @@
+llm:
+  base_url: https://api.deepseek.com
+  api_key: sk-db601209119044f6883b8fd902fd83d7
+  model: deepseek-v4-flash
+  embedding:
+    base_url: https://api.siliconflow.cn/v1
+    model: BAAI/bge-m3
+    api_key: sk-glnsforuahxkjbxpyvojniplbxmppbgszwhvfulyldspukrk
+  check_model: deepseek-v4-flash
