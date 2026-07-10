@@ -15,6 +15,7 @@ and edit between stages.
 from .planner import Planner
 from .writer import Writer, WriteResult
 from .checker import Checker, CheckReport, Issue
+from .post_write import PostWritePipeline, EnrichResult, EnrichmentChange
 
 __all__ = [
     "Planner",
@@ -23,4 +24,7 @@ __all__ = [
     "Checker",
     "CheckReport",
     "Issue",
+    "PostWritePipeline",
+    "EnrichResult",
+    "EnrichmentChange",
 ]

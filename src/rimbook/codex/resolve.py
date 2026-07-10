@@ -111,13 +111,15 @@ def guess_name(entity_id: str) -> str:
 class ResolvedId:
     """Outcome of resolving one raw id against the codex.
 
+    * ``raw_id`` — the original id string provided by the LLM.
     * ``canonical_id`` — the id to use (existing entry id, or a cleaned new id).
     * ``is_existing`` — True if matched to an existing codex entry.
     * ``is_new`` — True if the LLM explicitly marked this as new (``new:``).
     * ``match_reason`` — how the match was found, for logging/diagnostics.
     """
 
-    canonical_id: str
+    raw_id: str = ""
+    canonical_id: str = ""
     is_existing: bool = False
     is_new: bool = False
     match_reason: str = ""
@@ -139,12 +141,13 @@ def resolve_entity_id(raw_id: str, codex_store: CodexStore) -> ResolvedId:
     """
     raw = (raw_id or "").strip()
     if not raw:
-        return ResolvedId(canonical_id="", match_reason="empty")
+        return ResolvedId(raw_id=raw, canonical_id="", match_reason="empty")
 
     # 1. Explicit new-entity marker.
     if raw.startswith(NEW_ENTITY_PREFIX):
         clean = slugify(raw[len(NEW_ENTITY_PREFIX):])
         return ResolvedId(
+            raw_id=raw,
             canonical_id=_apply_prefix(clean, raw[len(NEW_ENTITY_PREFIX):]),
             is_new=True,
             match_reason="explicit new:",
@@ -157,7 +160,7 @@ def resolve_entity_id(raw_id: str, codex_store: CodexStore) -> ResolvedId:
     # 2. Exact id match.
     if raw in by_id:
         return ResolvedId(
-            canonical_id=raw, is_existing=True, match_reason="exact id"
+            raw_id=raw, canonical_id=raw, is_existing=True, match_reason="exact id"
         )
 
     # 3. Name / alias match (case-insensitive).
@@ -168,6 +171,7 @@ def resolve_entity_id(raw_id: str, codex_store: CodexStore) -> ResolvedId:
         candidates.append(guess_name(entry.id).lower())
         if target in candidates:
             return ResolvedId(
+                raw_id=raw,
                 canonical_id=entry.id,
                 is_existing=True,
                 match_reason=f"name/alias match: {entry.name}",
@@ -179,6 +183,7 @@ def resolve_entity_id(raw_id: str, codex_store: CodexStore) -> ResolvedId:
             candidates = {entry.name.lower(), *(a.lower() for a in entry.aliases)}
             if raw_name in candidates:
                 return ResolvedId(
+                    raw_id=raw,
                     canonical_id=entry.id,
                     is_existing=True,
                     match_reason=f"guessed-name match: {entry.name}",
@@ -194,6 +199,7 @@ def resolve_entity_id(raw_id: str, codex_store: CodexStore) -> ResolvedId:
                     "Fuzzy id match: %r → %r (core slug %r)", raw, entry.id, raw_core
                 )
                 return ResolvedId(
+                    raw_id=raw,
                     canonical_id=entry.id,
                     is_existing=True,
                     match_reason=f"fuzzy core-slug match with {entry.id}",
@@ -201,7 +207,7 @@ def resolve_entity_id(raw_id: str, codex_store: CodexStore) -> ResolvedId:
 
     # 5. No match — keep as a new id, but clean/slugify it.
     return ResolvedId(
-        canonical_id=slugify(raw), is_new=True, match_reason="no match (new)"
+        raw_id=raw, canonical_id=slugify(raw), is_new=True, match_reason="no match (new)"
     )
 
 

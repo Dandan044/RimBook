@@ -15,11 +15,27 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ..project import ProjectPaths
 
-__all__ = ["EntityState", "EntityStateStore"]
+__all__ = ["EntityState", "EntityStateStore", "KnowledgeItem", "PossessionItem"]
+
+
+class KnowledgeItem(BaseModel):
+    """A single fact an entity knows, with provenance metadata."""
+
+    fact: str = Field(..., description="The knowledge content.")
+    source_chapter: int = Field(default=0, ge=0, description="Chapter where this was learned.")
+    confidence: str = Field(default="high", description="high | medium | low.")
+
+
+class PossessionItem(BaseModel):
+    """A single item an entity holds, with provenance metadata."""
+
+    item: str = Field(..., description="The item name.")
+    acquired_chapter: int = Field(default=0, ge=0, description="Chapter where this was acquired.")
+    quantity: str = Field(default="", description="Optional quantity, e.g. '3卷'.")
 
 
 class EntityState(BaseModel):
@@ -27,12 +43,13 @@ class EntityState(BaseModel):
 
     entity_id: str
     location: str = Field(default="", description="Where the entity currently is.")
-    knowledge: list[str] = Field(
+    knowledge: list[KnowledgeItem] = Field(
         default_factory=list,
-        description="Key facts the entity has learned (plot-relevant).",
+        description="Key facts the entity has learned (plot-relevant), with provenance.",
     )
-    possessions: list[str] = Field(
-        default_factory=list, description="Notable items the entity holds."
+    possessions: list[PossessionItem] = Field(
+        default_factory=list,
+        description="Notable items the entity holds, with provenance.",
     )
     relationships: dict[str, str] = Field(
         default_factory=dict,
@@ -42,6 +59,29 @@ class EntityState(BaseModel):
         default="", description="Free-form current condition (injured, in disguise, ...)."
     )
     last_seen_chapter: int = Field(default=0, description="Chapter where last updated.")
+
+    # ---- backward-compat validators ----
+    @field_validator("knowledge", mode="before")
+    @classmethod
+    def _upgrade_knowledge(cls, v: Any) -> list[dict]:
+        """Accept old-style ``list[str]`` and upgrade to ``list[KnowledgeItem]``."""
+        if isinstance(v, list):
+            return [
+                {"fact": str(item)} if isinstance(item, str) else item
+                for item in v
+            ]
+        return v or []
+
+    @field_validator("possessions", mode="before")
+    @classmethod
+    def _upgrade_possessions(cls, v: Any) -> list[dict]:
+        """Accept old-style ``list[str]`` and upgrade to ``list[PossessionItem]``."""
+        if isinstance(v, list):
+            return [
+                {"item": str(item)} if isinstance(item, str) else item
+                for item in v
+            ]
+        return v or []
 
 
 class EntityStateStore:

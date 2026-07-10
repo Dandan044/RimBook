@@ -27,7 +27,21 @@ from ..project import ProjectPaths
 from .entity_state import EntityState, EntityStateStore
 from .window import SlidingWindow
 
-__all__ = ["ContextAssembler", "AssembledContext"]
+__all__ = ["ContextAssembler", "AssembledContext", "SectionInfo"]
+
+
+@dataclass
+class SectionInfo:
+    """One section of the assembled context, with metadata for structured display."""
+
+    key: str          # machine-readable key, e.g. "codex", "synopsis", "state"
+    label: str        # display label, e.g. "设定档案（必须严格遵守）"
+    text: str         # full text content of this section
+    tokens: int = 0   # estimated token count
+    # For codex section: per-entity sub-items
+    entities: list[dict] = field(default_factory=list)
+    # Generic sub-sections (for state, summaries, etc.)
+    sub_items: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -36,6 +50,7 @@ class AssembledContext:
 
     text: str
     sections: dict[str, str] = field(default_factory=dict)
+    section_list: list[SectionInfo] = field(default_factory=list)
     codex_used: list[CodexEntry] = field(default_factory=list)
     entity_states_used: list[EntityState] = field(default_factory=list)
     recent_chapters: list[int] = field(default_factory=list)
@@ -70,48 +85,141 @@ class ContextAssembler:
         """Assemble context for writing the given chapter outline."""
         sections: list[str] = []
         emit = sections.append  # local alias
+        section_list: list[SectionInfo] = []
 
         # --- 1. Relevant codex entries ---------------------------------
         entity_ids = chapter.all_entities()
         codex_entries, codex_truncated = self._gather_codex(entity_ids, chapter)
         if codex_entries:
-            emit("## 设定档案（必须严格遵守）\n")
+            codex_text_parts: list[str] = ["## 设定档案（必须严格遵守）\n"]
+            entity_infos: list[dict] = []
             for entry in codex_entries:
-                emit(f"### [{_type_label(entry.type)}] {entry.name}（id: {entry.id}）\n")
+                type_label = _type_label(entry.type)
+                header = f"### [{type_label}] {entry.name}（id: {entry.id}）\n"
+                codex_text_parts.append(header)
                 if entry.aliases:
-                    emit(f"别名：{'、'.join(entry.aliases)}\n")
-                emit(entry.body.strip() + "\n")
+                    codex_text_parts.append(
+                        f"别名：{'、'.join(entry.aliases)}\n"
+                    )
+                body_text = _demote_headings(entry.body.strip())
+                codex_text_parts.append(body_text + "\n")
+                # Include revelations from structured data
+                if entry.revelations:
+                    codex_text_parts.append("#### 章节发现\n")
+                    for rev in entry.revelations:
+                        codex_text_parts.append(
+                            f"- 第{rev.chapter}章：{rev.content}\n"
+                        )
+                # Include contradictions
+                if entry.contradictions:
+                    codex_text_parts.append("#### 待审核矛盾\n")
+                    for con in entry.contradictions:
+                        status = "已解决" if con.resolved else "未解决"
+                        codex_text_parts.append(
+                            f"- 第{con.chapter}章 [{status}]：{con.description}\n"
+                        )
+                        if con.evidence:
+                            codex_text_parts.append(
+                                f"  证据：{con.evidence}\n"
+                            )
+                # Build structured entity info for section_list
+                entity_infos.append({
+                    "id": entry.id,
+                    "name": entry.name,
+                    "type": entry.type,
+                    "type_label": type_label,
+                    "aliases": list(entry.aliases) if entry.aliases else [],
+                    "body": body_text,
+                    "revelations": [
+                        {"chapter": r.chapter, "content": r.content, "source": r.source}
+                        for r in entry.revelations
+                    ],
+                    "contradictions": [
+                        {"chapter": c.chapter, "description": c.description,
+                         "evidence": c.evidence, "resolved": c.resolved}
+                        for c in entry.contradictions
+                    ],
+                    "is_placeholder": not entry.body.strip(),
+                })
             if codex_truncated:
-                emit(f"（注：因 token 预算限制，部分设定条目已截断或省略）\n")
-            emit("")
+                codex_text_parts.append(
+                    "（注：因 token 预算限制，部分设定条目已截断或省略）\n"
+                )
+            codex_text_parts.append("")
+            codex_full = "".join(codex_text_parts)
+            emit(codex_full)
+            section_list.append(SectionInfo(
+                key="codex",
+                label="设定档案（必须严格遵守）",
+                text=codex_full.split("\n", 1)[-1].strip(),
+                tokens=_estimate_tokens(codex_full),
+                entities=entity_infos,
+            ))
 
         # --- 2. Synopsis + volume summary ------------------------------
         synopsis = self.outline.read_synopsis().strip()
         if synopsis:
-            emit("## 全书梗概\n")
-            emit(synopsis + "\n\n")
+            synopsis_text = f"## 全书梗概\n{synopsis}\n\n"
+            emit(synopsis_text)
+            section_list.append(SectionInfo(
+                key="synopsis", label="全书梗概",
+                text=synopsis, tokens=_estimate_tokens(synopsis),
+            ))
         if chapter.volume:
             vol = self.outline.read_volume(chapter.volume)
             if vol and vol.arc:
-                emit(f"## 本卷大纲（第 {vol.number} 卷：{vol.title or ''}）\n")
-                emit(vol.arc.strip() + "\n\n")
+                vol_text = (
+                    f"## 本卷大纲（第 {vol.number} 卷：{vol.title or ''}）\n"
+                    f"{vol.arc.strip()}\n\n"
+                )
+                emit(vol_text)
+                section_list.append(SectionInfo(
+                    key="volume",
+                    label=f"本卷大纲（第 {vol.number} 卷：{vol.title or ''}）",
+                    text=vol.arc.strip(),
+                    tokens=_estimate_tokens(vol.arc),
+                ))
 
         # --- 3. Recent chapter summaries -------------------------------
         summaries = self._gather_summaries(chapter.number)
         if summaries:
-            emit("## 此前剧情摘要（按章节）\n")
+            summary_parts: list[str] = ["## 此前剧情摘要（按章节）\n"]
+            summary_items: list[dict] = []
             for num, text in summaries:
-                emit(f"- 第 {num} 章：{text}\n")
-            emit("")
+                summary_parts.append(f"- 第 {num} 章：{text}\n")
+                summary_items.append({"chapter": num, "text": text})
+            summary_parts.append("")
+            summary_full = "".join(summary_parts)
+            emit(summary_full)
+            section_list.append(SectionInfo(
+                key="summaries", label="此前剧情摘要（按章节）",
+                text="\n".join(
+                    f"第 {num} 章：{text}" for num, text in summaries
+                ),
+                tokens=_estimate_tokens(summary_full),
+                sub_items=summary_items,
+            ))
 
         # --- 4. Recent full prose (sliding window) ---------------------
         recent = self.window.recent(
             self.generation.recent_window_chapters, before=chapter.number
         )
         if recent:
-            emit("## 紧邻的前文（保持文风/人称/时态连贯）\n")
+            prose_parts: list[str] = [
+                "## 紧邻的前文（保持文风/人称/时态连贯）\n"
+            ]
             for ch in recent:
-                emit(f"--- 第 {ch.number} 章原文 ---\n{ch.text}\n\n")
+                prose_parts.append(
+                    f"--- 第 {ch.number} 章原文 ---\n{ch.text}\n\n"
+                )
+            prose_full = "".join(prose_parts)
+            emit(prose_full)
+            section_list.append(SectionInfo(
+                key="recent_prose",
+                label="紧邻的前文（保持文风/人称/时态连贯）",
+                text=prose_full.split("\n", 1)[-1].strip(),
+                tokens=_estimate_tokens(prose_full),
+            ))
             self_recent_nums = [c.number for c in recent]
         else:
             self_recent_nums = []
@@ -120,20 +228,45 @@ class ContextAssembler:
         states = self.entity_state.get_many(entity_ids)
         states = [s for s in states if _state_nonempty(s)]
         if states:
-            emit("## 相关实体的当前状态（写作时必须与此一致）\n")
+            state_parts: list[str] = [
+                "## 相关实体的当前状态（写作时必须与此一致）\n"
+            ]
+            state_items: list[dict] = []
             for s in states:
-                emit(self._format_state(s))
-            emit("")
+                formatted = self._format_state(s)
+                state_parts.append(formatted)
+                state_items.append(_state_to_dict(s))
+            state_parts.append("")
+            state_full = "".join(state_parts)
+            emit(state_full)
+            section_list.append(SectionInfo(
+                key="entity_state",
+                label="相关实体的当前状态（写作时必须与此一致）",
+                text="\n".join(
+                    _state_one_line(si) for si in state_items
+                ),
+                tokens=_estimate_tokens(state_full),
+                sub_items=state_items,
+            ))
 
         # --- 6. The chapter beat itself --------------------------------
-        emit("## 本章任务（必须按此推进剧情）\n")
-        emit(self._format_beat(chapter))
-        emit("")
+        beat_text = self._format_beat(chapter)
+        beat_full = (
+            f"## 本章任务（必须按此推进剧情）\n{beat_text}"
+        )
+        emit(beat_full)
+        section_list.append(SectionInfo(
+            key="beat",
+            label="本章任务（必须按此推进剧情）",
+            text=beat_text.strip(),
+            tokens=_estimate_tokens(beat_full),
+        ))
 
         text = "\n".join(sections)
         return AssembledContext(
             text=text,
-            sections={},  # not segmented further; sections are inline above
+            sections={s.key: s.text for s in section_list},
+            section_list=section_list,
             codex_used=codex_entries,
             entity_states_used=states,
             recent_chapters=self_recent_nums,
@@ -243,6 +376,9 @@ class ContextAssembler:
                     aliases=entry.aliases,
                     tags=entry.tags,
                     related=entry.related,
+                    revelations=list(entry.revelations),
+                    contradictions=list(entry.contradictions),
+                    relationships=list(entry.relationships),
                     body=chosen,
                 )
             )
@@ -290,9 +426,15 @@ class ContextAssembler:
         if s.status:
             lines.append(f"    当前状态：{s.status}")
         if s.knowledge:
-            lines.append(f"    已知信息：{'；'.join(s.knowledge)}")
+            knowledge_text = "；".join(
+                k.fact if hasattr(k, 'fact') else str(k) for k in s.knowledge
+            )
+            lines.append(f"    已知信息：{knowledge_text}")
         if s.possessions:
-            lines.append(f"    随身物品：{'、'.join(s.possessions)}")
+            possession_text = "、".join(
+                p.item if hasattr(p, 'item') else str(p) for p in s.possessions
+            )
+            lines.append(f"    随身物品：{possession_text}")
         if s.relationships:
             rels = "、".join(f"{k}({v})" for k, v in s.relationships.items())
             lines.append(f"    人际关系：{rels}")
@@ -323,6 +465,16 @@ def _type_label(t: str) -> str:
     return _TYPE_LABELS.get(t, t)
 
 
+def _demote_headings(text: str) -> str:
+    """Demote markdown headings by one level so body content nests correctly.
+
+    ``## 外貌`` → ``### 外貌``, ``# 背景`` → ``## 背景``.
+    This prevents body-internal headings from being parsed as context sections.
+    """
+    import re
+    return re.sub(r"^(#+)(\s)", lambda m: "#" + m.group(1) + m.group(2), text, flags=re.MULTILINE)
+
+
 def _state_nonempty(s: EntityState) -> bool:
     return any(
         [
@@ -334,3 +486,50 @@ def _state_nonempty(s: EntityState) -> bool:
             s.last_seen_chapter > 0,
         ]
     )
+
+
+def _state_to_dict(s: EntityState) -> dict:
+    """Convert an EntityState to a JSON-serialisable dict for structured display."""
+    return {
+        "entity_id": s.entity_id,
+        "location": s.location or "",
+        "status": s.status or "",
+        "knowledge": [
+            k.fact if hasattr(k, 'fact') else str(k)
+            for k in s.knowledge
+        ],
+        "possessions": [
+            p.item if hasattr(p, 'item') else str(p)
+            for p in s.possessions
+        ],
+        "relationships": dict(s.relationships) if s.relationships else {},
+        "last_seen_chapter": s.last_seen_chapter,
+    }
+
+
+def _state_one_line(si: dict) -> str:
+    """One-line summary of an entity state dict, never empty."""
+    parts = [si["entity_id"]]
+    if si["status"]:
+        parts.append(f"状态:{si['status']}")
+    if si["location"]:
+        parts.append(f"@{si['location']}")
+    return " ".join(parts)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: CJK ~1.5 chars/token, ASCII ~4 chars/token."""
+    cjk = 0
+    ascii_chars = 0
+    for ch in text:
+        cp = ord(ch)
+        if (
+            (0x3040 <= cp <= 0x30FF)
+            or (0x3400 <= cp <= 0x9FFF)
+            or (0xFF00 <= cp <= 0xFFEF)
+            or cp > 127
+        ):
+            cjk += 1
+        else:
+            ascii_chars += 1
+    return max(1, int(cjk / 1.5 + ascii_chars / 4))

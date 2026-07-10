@@ -25,7 +25,7 @@ from rimbook.memory import (
     Summarizer,
 )
 from rimbook.outline import OutlineStore
-from rimbook.pipeline import Checker, Planner, Writer
+from rimbook.pipeline import Checker, Planner, Writer, PostWritePipeline
 from rimbook.project import ProjectPaths, scaffold_project
 
 PROMPTS = Prompts()
@@ -108,6 +108,17 @@ class ProjectDeps:
     @property
     def checker(self) -> Checker:
         return Checker(self.paths, llm=self.llm, prompts=PROMPTS)
+
+    @property
+    def enricher(self) -> PostWritePipeline:
+        return PostWritePipeline(
+            llm=self.llm,
+            prompts=PROMPTS,
+            codex=self.codex,
+            entity_state=self.entity_state,
+            summarizer=self.summarizer,
+            generation=self.config.generation,
+        )
 
 
 def _resolve_project(project_id: str) -> Path:

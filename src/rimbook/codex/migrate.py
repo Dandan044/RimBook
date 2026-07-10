@@ -270,6 +270,90 @@ def merge_duplicate_entities(
     return report
 
 
+# ----------------------------------------------------------------------
+# Migration 3: unstructured body → structured frontmatter (v2)
+# ----------------------------------------------------------------------
+_REVELATION_PATTERN = re.compile(
+    r"\n*---\n### 🤖 第(\d+)章自动揭示\n(.*?)(?=\n---\n### 🤖 第|\n---\n### ⚠️|\n*$)",
+    re.DOTALL,
+)
+_CONTRADICTION_PATTERN = re.compile(
+    r"\n*---\n### ⚠️ 待审核矛盾（第(\d+)章）\n(.*?)(?=\n---\n### 🤖 第|\n---\n### ⚠️|\n*$)",
+    re.DOTALL,
+)
+
+
+@dataclass
+class StructMigrationReport:
+    scanned: int = 0
+    revelations_extracted: int = 0
+    contradictions_extracted: int = 0
+    conflicts_skipped: int = 0
+    details: list[str] = field(default_factory=list)
+
+
+def migrate_to_structured(
+    codex_store: CodexStore,
+) -> StructMigrationReport:
+    """Extract legacy markdown sections from body into structured frontmatter.
+
+    Scans every codex entry's body for:
+      * ``### 🤖 第N章自动揭示`` → :class:`Revelation` objects.
+      * ``### ⚠️ 待审核矛盾（第N章）`` → :class:`Contradiction` objects.
+
+    After extraction the sections are removed from the body. If a structured
+    field already has data for the same chapter, the legacy section is
+    skipped (idempotent).
+    """
+    from ..codex.models import Revelation, Contradiction
+
+    report = StructMigrationReport()
+    for entry in codex_store.iter_all():
+        report.scanned += 1
+        body = entry.body
+        changed = False
+
+        # ---- revelations ----
+        existing_chapters = {r.chapter for r in entry.revelations}
+        for m in _REVELATION_PATTERN.finditer(body):
+            ch = int(m.group(1))
+            content = m.group(2).strip()
+            if ch in existing_chapters:
+                report.conflicts_skipped += 1
+                continue
+            entry.revelations.append(Revelation(chapter=ch, content=content))
+            report.revelations_extracted += 1
+            changed = True
+
+        # ---- contradictions ----
+        existing_contra_chapters = {c.chapter for c in entry.contradictions}
+        for m in _CONTRADICTION_PATTERN.finditer(body):
+            ch = int(m.group(1))
+            content = m.group(2).strip()
+            if ch in existing_contra_chapters:
+                report.conflicts_skipped += 1
+                continue
+            entry.contradictions.append(Contradiction(
+                chapter=ch, description=content,
+            ))
+            report.contradictions_extracted += 1
+            changed = True
+
+        # ---- strip sections from body ----
+        if changed:
+            # Remove matched sections from body.
+            clean = _REVELATION_PATTERN.sub("", body)
+            clean = _CONTRADICTION_PATTERN.sub("", clean)
+            entry.body = clean.strip() + "\n"
+            codex_store.write(entry)
+            report.details.append(
+                f"  {entry.id}: +{report.revelations_extracted} revelations, "
+                f"+{report.contradictions_extracted} contradictions"
+            )
+
+    return report
+
+
 def _remap_chapter_entities(ch, remap: dict[str, str]) -> bool:
     """Rewrite a chapter outline's entity ids in-place. Returns True if changed."""
     changed = False

@@ -33,6 +33,10 @@ class CodexEntryOut(BaseModel):
     tags: list[str] = []
     related: list[str] = []
     body: str = ""
+    # v2 structured fields
+    revelations: list[dict] = []
+    contradictions: list[dict] = []
+    relationships: list[dict] = []
 
 
 class CodexEntryUpdate(BaseModel):
@@ -125,4 +129,7 @@ def _entry_to_out(e: CodexEntry) -> CodexEntryOut:
     return CodexEntryOut(
         id=e.id, name=e.name, type=e.type,
         aliases=e.aliases, tags=e.tags, related=e.related, body=e.body,
+        revelations=[r.model_dump() for r in e.revelations],
+        contradictions=[c.model_dump() for c in e.contradictions],
+        relationships=[r.model_dump() for r in e.relationships],
     )

@@ -43,6 +43,10 @@ export interface CodexEntry {
   tags: string[]
   related: string[]
   body: string
+  // v2 structured fields
+  revelations: { chapter: number; content: string; source: string }[]
+  contradictions: { chapter: number; description: string; evidence: string; resolved: boolean }[]
+  relationships: { target: string; type: string; since_chapter: number; notes: string }[]
 }
 
 export interface SceneBeat {
@@ -189,6 +193,7 @@ export function writeChapterSSE(
     onContext?: (data: unknown) => void
     onDraft?: (data: unknown) => void
     onCheck?: (data: unknown) => void
+    onEnrichment?: (data: unknown) => void
     onError?: (msg: string) => void
     onDone?: (data: unknown) => void
   },
@@ -210,6 +215,9 @@ export function writeChapterSSE(
   })
   es.addEventListener('check', (e: MessageEvent) => {
     handlers.onCheck?.(JSON.parse(e.data))
+  })
+  es.addEventListener('enrichment', (e: MessageEvent) => {
+    handlers.onEnrichment?.(JSON.parse(e.data))
   })
   es.addEventListener('error', (e: MessageEvent) => {
     try {

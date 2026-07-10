@@ -15,9 +15,28 @@ import frontmatter
 from pydantic import ValidationError
 
 from ..project import ProjectPaths
-from .models import CodexEntry, ENTITY_TYPE_PLURALS, VALID_TYPES
+from .models import CodexEntry, Revelation, Contradiction, Relationship, ENTITY_TYPE_PLURALS, VALID_TYPES
 
 __all__ = ["CodexStore"]
+
+
+def _serialize_structured(entry: CodexEntry) -> dict:
+    """Convert structured fields to frontmatter-safe dicts."""
+    meta: dict[str, Any] = {
+        "id": entry.id,
+        "name": entry.name,
+        "type": entry.type,
+        "aliases": entry.aliases,
+        "tags": entry.tags,
+        "related": entry.related,
+    }
+    if entry.revelations:
+        meta["revelations"] = [r.model_dump() for r in entry.revelations]
+    if entry.contradictions:
+        meta["contradictions"] = [c.model_dump() for c in entry.contradictions]
+    if entry.relationships:
+        meta["relationships"] = [r.model_dump() for r in entry.relationships]
+    return meta
 
 
 class CodexStore:
@@ -44,14 +63,7 @@ class CodexStore:
         path.parent.mkdir(parents=True, exist_ok=True)
 
         post = frontmatter.Post(entry.body)
-        post.metadata = {
-            "id": entry.id,
-            "name": entry.name,
-            "type": entry.type,
-            "aliases": entry.aliases,
-            "tags": entry.tags,
-            "related": entry.related,
-        }
+        post.metadata = _serialize_structured(entry)
         with path.open("w", encoding="utf-8") as fh:
             fh.write(frontmatter.dumps(post, sort_keys=False))
         return path
@@ -141,6 +153,9 @@ class CodexStore:
             aliases=list(meta.get("aliases") or []),
             tags=list(meta.get("tags") or []),
             related=list(meta.get("related") or []),
+            revelations=[Revelation(**r) for r in (meta.get("revelations") or []) if isinstance(r, dict)],
+            contradictions=[Contradiction(**c) for c in (meta.get("contradictions") or []) if isinstance(c, dict)],
+            relationships=[Relationship(**r) for r in (meta.get("relationships") or []) if isinstance(r, dict)],
             body=post.content.strip(),
         )
 

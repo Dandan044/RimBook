@@ -63,6 +63,7 @@ def preview_context(number: int, deps: ProjectDeps = Depends(get_project_deps)) 
     ctx = deps.assembler.assemble_for_chapter(ch)
     return {
         "text": ctx.text,
+        "section_list": _serialize_section_list(ctx.section_list),
         "codex_used": [e.id for e in ctx.codex_used],
         "entity_states": [s.entity_id for s in ctx.entity_states_used],
         "recent_chapters": ctx.recent_chapters,
@@ -101,6 +102,25 @@ def write_chapter_sse(number: int, deps: ProjectDeps = Depends(get_project_deps)
                 "entities_tracked": result.entities_tracked,
                 "usage": result.usage,
             })
+
+            # Enrichment results (auto codex expansion).
+            if result.enrichment:
+                yield sse_progress("正在扩充设定集…")
+                yield sse_event("enrichment", {
+                    "created": [
+                        {"id": c.entity_id, "detail": c.detail}
+                        for c in result.enrichment.entities_created
+                    ],
+                    "updated": [
+                        {"id": c.entity_id, "detail": c.detail}
+                        for c in result.enrichment.entities_updated
+                    ],
+                    "contradictions": [
+                        {"id": c.entity_id, "detail": c.detail}
+                        for c in result.enrichment.contradictions
+                    ],
+                    "summary": result.enrichment.summary,
+                })
 
             # Optional consistency check
             if deps.config.generation.auto_consistency_check:
@@ -225,3 +245,23 @@ def create_snapshot(deps: ProjectDeps = Depends(get_project_deps)) -> dict:
         else:
             shutil.copy2(item, snap_dir / item.name)
     return {"snapshot": snap_dir.name}
+
+
+# ---- helpers ----
+
+def _serialize_section_list(section_list: list) -> list[dict]:
+    """Convert SectionInfo dataclass instances to JSON-safe dicts."""
+    result: list[dict] = []
+    for sec in section_list:
+        d = {
+            "key": sec.key,
+            "label": sec.label,
+            "text": sec.text,
+            "tokens": sec.tokens,
+        }
+        if sec.entities:
+            d["entities"] = sec.entities
+        if sec.sub_items:
+            d["sub_items"] = sec.sub_items
+        result.append(d)
+    return result

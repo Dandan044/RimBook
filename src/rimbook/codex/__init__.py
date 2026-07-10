@@ -10,7 +10,14 @@ lives separately in :mod:`rimbook.memory.entity_state`. This module only
 holds the *static* profile of each entity.
 """
 
-from .models import CodexEntry, ENTITY_TYPE_PLURALS, VALID_TYPES
+from .models import (
+    CodexEntry,
+    Revelation,
+    Contradiction,
+    Relationship,
+    ENTITY_TYPE_PLURALS,
+    VALID_TYPES,
+)
 from .store import CodexStore
 from .sync import sync_codex_from_states, strip_state_section, LEGACY_STATE_MARKER
 from .resolve import (
@@ -25,12 +32,17 @@ from .resolve import (
 from .migrate import (
     migrate_state_sections,
     merge_duplicate_entities,
+    migrate_to_structured,
     MigrationReport,
     MergeReport,
+    StructMigrationReport,
 )
 
 __all__ = [
     "CodexEntry",
+    "Revelation",
+    "Contradiction",
+    "Relationship",
     "CodexStore",
     "ENTITY_TYPE_PLURALS",
     "VALID_TYPES",
@@ -46,6 +58,8 @@ __all__ = [
     "merge_entries",
     "migrate_state_sections",
     "merge_duplicate_entities",
+    "migrate_to_structured",
     "MigrationReport",
     "MergeReport",
+    "StructMigrationReport",
 ]

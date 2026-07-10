@@ -111,6 +111,7 @@ class GenerationConfig(BaseModel):
     top_p: float = 1.0
     codex_max_tokens: int = 2000
     codex_entry_max_chars: int = 1500
+    auto_enrich: bool = True  # LLM-driven codex enrichment after each chapter
 
 
 class Config(BaseModel):
@@ -212,6 +213,7 @@ def load_config(project_dir: Path, *, global_cfg: dict[str, Any] | None = None) 
         top_p=gen_raw.get("top_p", 1.0),
         codex_max_tokens=gen_raw.get("codex_max_tokens", 2000),
         codex_entry_max_chars=gen_raw.get("codex_entry_max_chars", 1500),
+        auto_enrich=gen_raw.get("auto_enrich", True),
     )
 
     return Config(

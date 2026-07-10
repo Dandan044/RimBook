@@ -23,6 +23,7 @@ from ..memory import ContextAssembler, Summarizer
 from ..outline import ChapterOutline, OutlineStore
 from ..project import ProjectPaths
 from ..memory.entity_state import EntityStateStore
+from .post_write import PostWritePipeline, EnrichResult
 
 __all__ = ["Writer", "WriteResult"]
 
@@ -37,6 +38,7 @@ class WriteResult:
     context_preview: str = ""
     entities_tracked: list[str] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
+    enrichment: EnrichResult | None = None
 
 
 class Writer:
@@ -64,6 +66,18 @@ class Writer:
         self.entity_state = entity_state
         self.codex = codex
         self.generation = generation
+
+    @property
+    def _enricher(self) -> PostWritePipeline:
+        """Lazily-constructed enrichment pipeline (avoids circular deps)."""
+        return PostWritePipeline(
+            llm=self.llm,
+            prompts=self.prompts,
+            codex=self.codex,
+            entity_state=self.entity_state,
+            summarizer=self.summarizer,
+            generation=self.generation,
+        )
 
     def write(self, number: int, *, persist: bool = True) -> WriteResult:
         """Generate (and persist) the draft for chapter *number*."""
@@ -97,27 +111,22 @@ class Writer:
             draft_path.parent.mkdir(parents=True, exist_ok=True)
             draft_path.write_text(draft + "\n", encoding="utf-8")
 
-        # 4. Summarize + track entity state (best-effort; never fatal).
+        # 4. Run post-write pipeline: summarize + state + codex enrichment.
+        enrich_result = self._enricher.run(
+            number,
+            draft,
+            chapter,
+            enrich=self.generation.auto_enrich,
+        )
+        entity_ids = chapter.all_entities()
         summary = ""
-        tracked: list[str] = []
+        tracked = list(entity_ids)
         try:
-            summary = self.summarizer.summarize(number, draft)
-        except Exception as exc:  # pragma: no cover - network/model errors
-            summary = f"（摘要生成失败：{exc}）"
-        try:
-            entity_ids = chapter.all_entities()
-            if entity_ids:
-                deltas = self.summarizer.extract_entity_deltas(number, draft, entity_ids)
-                updated = Summarizer.apply_deltas(deltas, self.entity_state, number)
-                tracked = [s.entity_id for s in updated]
-        except Exception:  # pragma: no cover
-            pass
-
-        # 5. Sync codex with the latest entity states (best-effort; never fatal).
-        try:
-            if tracked:
-                sync_codex_from_states(tracked, self.entity_state, self.codex)
-        except Exception:  # pragma: no cover
+            # Re-read summary from disk (summarizer wrote it inside .run()).
+            ch = self.outline.read_chapter(number)
+            if ch and ch.summary:
+                summary = ch.summary
+        except Exception:
             pass
 
         return WriteResult(
@@ -127,6 +136,7 @@ class Writer:
             context_preview=context.text[:400] + ("…" if len(context.text) > 400 else ""),
             entities_tracked=tracked,
             usage=gen.usage,
+            enrichment=enrich_result if self.generation.auto_enrich else None,
         )
 
     def revise(
@@ -170,10 +180,17 @@ class Writer:
             draft_path.parent.mkdir(parents=True, exist_ok=True)
             draft_path.write_text(revised + "\n", encoding="utf-8")
 
+        # Run post-write pipeline.
+        enrich_result = self._enricher.run(
+            number, revised, chapter, enrich=self.generation.auto_enrich
+        )
+        summary = ""
         try:
-            summary = self.summarizer.summarize(number, revised)
-        except Exception as exc:  # pragma: no cover
-            summary = f"（摘要生成失败：{exc}）"
+            ch = self.outline.read_chapter(number)
+            if ch and ch.summary:
+                summary = ch.summary
+        except Exception:
+            pass
 
         return WriteResult(
             chapter_number=number,

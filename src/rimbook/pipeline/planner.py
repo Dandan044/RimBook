@@ -249,11 +249,10 @@ def _parse_chapter_json(
 
         resolved, res_log = resolve_entity_ids([str(x) for x in raw_ids], codex)
         for r in res_log:
-            if r.canonical_id != r.canonical_id or r.match_reason.startswith("fuzzy"):
+            if r.match_reason.startswith("fuzzy") or r.match_reason.startswith("guessed-name"):
                 warnings.append(
-                    f"实体 id 规范化：{r.canonical_id}（{r.match_reason}）"
+                    f"实体 id 规范化：{r.raw_id or r.canonical_id} → {r.canonical_id}（{r.match_reason}）"
                 )
-        # Surface new-entity ids too.
         for r in res_log:
             if r.is_new:
                 warnings.append(f"新实体：{r.canonical_id}（请稍后在 codex 中补充档案）")

@@ -336,6 +336,28 @@ def codex_migrate(
         console.print(f"  {detail}")
 
 
+@codex_app.command("migrate-v2")
+def codex_migrate_v2(
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+) -> None:
+    """将旧版 body 中的 🤖/⚠️ markdown section 迁移到结构化 frontmatter。"""
+    from .codex import migrate_to_structured
+
+    deps = _load_deps(project)
+    console.print("[cyan]正在扫描 codex 条目…[/cyan]")
+    report = migrate_to_structured(deps.codex)
+    if report.revelations_extracted == 0 and report.contradictions_extracted == 0:
+        console.print("[green]所有条目已是最新结构化格式，无需迁移。[/green]")
+        return
+    console.print(f"[green]完成：[/green]扫描 {report.scanned} 条")
+    console.print(f"  提取发现：{report.revelations_extracted} 条")
+    console.print(f"  提取矛盾：{report.contradictions_extracted} 条")
+    if report.conflicts_skipped:
+        console.print(f"  [yellow]跳过冲突：{report.conflicts_skipped} 条（已有同章节数据）[/yellow]")
+    for d in report.details:
+        console.print(d)
+
+
 # ======================================================================
 # outline commands
 # ======================================================================
@@ -437,6 +459,10 @@ def write(
     if result.usage:
         console.print(f"[dim]tokens: {result.usage}[/dim]")
 
+    # Enrichment results.
+    if result.enrichment:
+        _print_enrichment(result.enrichment)
+
     # Consistency check / auto-fix.
     do_check = deps.config.generation.auto_consistency_check if check is None else check
     if do_check:
@@ -485,6 +511,75 @@ def summary(
     sm = deps.summarizer.summarize(number, text)
     console.print(Panel(sm, title="章节摘要"))
     console.print(f"[green]已写回[/green] {deps.paths.chapter_outline(number)}")
+
+
+@app.command()
+def enrich(
+    number: int = typer.Argument(..., help="章节号"),
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="仅预览变更不写入"),
+) -> None:
+    """对已写的章节草稿运行 LLM 设定集扩充（发现新实体、更新档案、标记矛盾）。"""
+    deps = _load_deps(project)
+
+    # Read the draft.
+    draft_path = deps.paths.draft_file(number)
+    if not draft_path.exists():
+        console.print(f"[red]未找到第 {number} 章草稿[/red]")
+        raise typer.Exit(code=1)
+    draft = draft_path.read_text(encoding="utf-8").strip()
+
+    chapter = deps.outline.read_chapter(number)
+    if chapter is None:
+        console.print(f"[red]第 {number} 章无章节规划[/red]")
+        raise typer.Exit(code=1)
+
+    from .pipeline.post_write import PostWritePipeline
+
+    enricher = PostWritePipeline(
+        llm=deps.llm,
+        prompts=PROMPTS,
+        codex=deps.codex,
+        entity_state=deps.entity_state,
+        summarizer=deps.summarizer,
+        generation=deps.config.generation,
+    )
+
+    if dry_run:
+        console.print("[cyan]正在分析（dry-run 模式）…[/cyan]")
+        data = enricher.enrich_codex(number, draft, chapter.all_entities())
+        console.print(f"[yellow]将创建 {len(data.get('new_entities', []))} 个新实体[/yellow]")
+        for ne in data.get("new_entities") or []:
+            console.print(f"  • [green]{ne.get('id')}[/green]: {ne.get('name')} [{ne.get('type')}]")
+        console.print(f"[yellow]将更新 {len(data.get('updates', []))} 个已有实体[/yellow]")
+        for up in data.get("updates") or []:
+            console.print(f"  • {up.get('id')}")
+            if up.get("contradictions"):
+                for c in up["contradictions"]:
+                    console.print(f"    [red]⚠ {c}[/red]")
+        return
+
+    console.print(f"[cyan]正在对第 {number} 章进行设定集扩充…[/cyan]")
+    enrich_result = enricher.run(number, draft, chapter, enrich=True)
+    _print_enrichment(enrich_result)
+
+
+def _print_enrichment(result) -> None:
+    """Print enrichment results in a readable format."""
+    if result.entities_created:
+        console.print(f"[green]新增实体（{len(result.entities_created)} 个）：[/green]")
+        for c in result.entities_created:
+            console.print(f"  • {c.detail}")
+    if result.entities_updated:
+        console.print(f"[cyan]更新实体（{len(result.entities_updated)} 个）：[/cyan]")
+        for c in result.entities_updated:
+            console.print(f"  • {c.detail}")
+    if result.contradictions:
+        console.print(f"[red]发现矛盾（{len(result.contradictions)} 处）：[/red]")
+        for c in result.contradictions:
+            console.print(f"  • [{c.entity_id}] {c.detail}")
+    if result.summary:
+        console.print(f"[dim]{result.summary}[/dim]")
 
 
 def _run_check_and_maybe_fix(

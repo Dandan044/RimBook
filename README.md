@@ -12,31 +12,72 @@
 | 设定混淆 | 结构化设定集（Codex）显式加载 + 一致性校验 |
 | 人物 OOC | 人物档案（含语言风格画像）+ 实体当前状态跟踪 |
 | 剧情混乱 | 分层大纲（梗概→卷→章节 beat）+ 大纲遵循检查 |
+| 设定演进 | PostWritePipeline：每章写完后 LLM 自动发现新实体、标记矛盾 |
+| Token 超限 | BudgetAllocator：按优先级（beat > chapter > tag > 向量）分配上下文预算 |
+
+## 设定集（Codex）生命周期
+
+```
+作者手动创建 ──→ Planner 引用实体 ──→ 汇编器注入上下文 ──→ Writer 生成
+        ↑                                                        │
+        │                    阶段性手动修订                        ↓
+        │                                          ┌─ 实体状态追踪（谁在哪、知道什么）
+        └── PostWritePipeline 自动富化 ←───────────┤
+           · 发现新实体 / 更新档案                    └─ 一致性校验收敛
+           · 标记矛盾 / 同步关系
+```
+
+每个 Codex 条目现在使用**结构化字段**，而非在正文中嵌入 markdown 章节：
+- `revelations` — 每章自动发现（章节号、内容、来源引用）
+- `contradictions` — 已标记的不一致（章节号、描述、证据、已解决状态）
+- `relationships` — 有类型的实体间链接（目标、类型、起始章节、备注）
+- `body` — 纯粹的静态档案（外观、性格、背景等）
 
 ## 架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Web UI (Vue 3)                    │
-│   仪表盘 │ 设定集 │ 大纲编辑器 │ 写作工作台 │ 设置    │
-├─────────────────────────────────────────────────────┤
-│                 FastAPI Backend (SSE)                │
-├──────────┬──────────┬───────────┬───────────────────┤
-│  Codex   │ Outline  │  Memory   │     Pipeline      │
-│ 设定集   │ 分层大纲  │ 上下文组装 │  写-检-改 流水线  │
-│          │          │           │                   │
-│ 人物档案  │ 梗概     │ 摘要树    │ Planner (规划)    │
-│ 世界观    │ 卷大纲   │ 滑动窗口  │ Writer  (写作)    │
-│ 地点/势力 │ 章节beat │ 实体状态  │ Checker (校验)    │
-│ 物品/时间 │          │ Token预算 │                   │
-│          │          │ 向量检索  │                   │
-├──────────┴──────────┴───────────┴───────────────────┤
-│          LLM Layer (OpenAI 兼容协议)                 │
-│     支持 DeepSeek / OpenAI / 任意兼容端点             │
-├─────────────────────────────────────────────────────┤
-│     存储层：纯文件 (Markdown + YAML)，人类可读可编辑    │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       Web UI (Vue 3)                              │
+│   仪表盘 │ 设定集 │ 大纲编辑器 │ 写作工作台 │ 设置                │
+│                                                                    │
+│   · 设定集：Tab 式（档案 / 章节发现 / 矛盾）                      │
+│   · 写作工作台：结构化上下文视图                                  │
+│     ─ 实体卡片（完整档案 + 发现时间线 + 矛盾标记）                 │
+│     ─ 状态卡片（位置 / 知识 / 物品 / 人际关系）                   │
+│     ─ 可折叠分区（带 Token 预算指示器）                           │
+├──────────────────────────────────────────────────────────────────┤
+│                    FastAPI Backend (SSE)                           │
+├──────────┬──────────┬───────────┬────────────────────────────────┤
+│  Codex   │ Outline  │  Memory   │          Pipeline               │
+│ 设定集   │ 分层大纲  │ 上下文组装 │   写-检-改-富化 流水线        │
+│          │          │           │                                │
+│ 实体档案  │ 梗概     │ 摘要树    │ Planner (规划)                 │
+│ 世界观    │ 卷大纲   │ 滑动窗口  │ Writer  (写作, SSE 流式)       │
+│ 地点/势力 │ 章节beat │ 实体状态  │ Checker (一致性校验)           │
+│ 物品/时间 │          │ Token预算 │ PostWrite (LLM 驱动富化)       │
+│ 发现/矛盾 │          │ 向量检索  │ · 发现新实体 / 档案更新       │
+│          │          │ 结构化分段 │ · 矛盾标记 / 关系同步         │
+├──────────┴──────────┴───────────┴────────────────────────────────┤
+│           LLM Layer (OpenAI 兼容协议)                              │
+│      支持 DeepSeek / OpenAI / 任意兼容端点                         │
+├──────────────────────────────────────────────────────────────────┤
+│      存储层：纯文件 (Markdown + YAML)，人类可读可编辑，Git 友好     │
+└──────────────────────────────────────────────────────────────────┘
 ```
+
+## 配置架构
+
+RimBook 采用**两级配置**，模型配置与项目分离：
+
+```
+.rimbook.yaml              ← 全局工作区配置（LLM API / 模型名）
+  └── my_novel/
+      └── config.yaml      ← 项目配置（标题、作者、生成参数）
+```
+
+- **全局配置 `.rimbook.yaml`**：所有项目共享的 LLM 连接信息。创建/删除项目不会影响它。
+- **项目配置 `config.yaml`**：每个项目独立的生成参数（temperature、窗口大小等）。
+- 合并优先级：**环境变量 > 项目配置 > 全局配置**。
 
 ## 安装
 
@@ -95,11 +136,12 @@ init → codex add → outline synopsis → outline chapter → write → check
 | 命令 | 作用 |
 |------|------|
 | `init` | 初始化小说项目 |
-| `codex add / ls / show / dedup / merge` | 管理设定集（人物/世界观/地点/势力/物品/时间线） |
+| `codex add / ls / show / dedup / merge / migrate` | 管理设定集（实体/世界观/地点/势力/物品/时间线） |
 | `outline synopsis` | 生成全书梗概 |
 | `outline volume` | 规划卷大纲 |
 | `outline chapter` | 规划单章 beat |
-| `write <n>` | 生成章节正文（完整流水线） |
+| `write <n>` | 生成章节正文（完整流水线：上下文组装→写作→校验→富化） |
+| `enrich <n>` | 单独运行 PostWrite 富化流水线（从已写章节发现实体、标记矛盾） |
 | `check <n>` | 单独跑一致性校验 |
 | `revise <n>` | 按要求重写/修订章节 |
 | `summary <n>` | 重新生成章节摘要 |
@@ -114,13 +156,27 @@ init → codex add → outline synopsis → outline chapter → write → check
 ```
 src/rimbook/
 ├── cli.py              # Typer CLI 入口
-├── config.py           # 两级配置（全局 + 项目）
+├── config.py           # 两级配置（全局 .rimbook.yaml + 项目 config.yaml）
 ├── project.py          # 项目布局与脚手架
-├── codex/              # 设定集层：实体档案 CRUD、去重、合并
+├── codex/              # 设定集层：实体档案 CRUD、去重、合并、结构化迁移
+│   ├── models.py       # CodexEntry + Revelation / Contradiction / Relationship
+│   ├── store.py        # YAML frontmatter 读写
+│   ├── sync.py         # 实体状态 ↔ 设定集双向同步
+│   ├── resolve.py      # 实体 ID 解析（精确/别名/模糊匹配）、去重、合并
+│   └── migrate.py      # 旧格式 → 结构化格式数据迁移
 ├── llm/                # LLM 抽象层：OpenAI 兼容客户端 + 提示词模板
-├── memory/             # 上下文组装：摘要树、滑动窗口、实体状态、Token 预算
+├── memory/             # 上下文组装与 Token 预算
+│   ├── assembler.py    # 分层上下文组装（SectionInfo 结构化分段）
+│   ├── entity_state.py # 实体当前状态（位置/知识/物品/关系）
+│   ├── summarizer.py   # 章节摘要生成
+│   ├── window.py       # 前文滑动窗口
+│   └── token_budget.py # BudgetAllocator（按优先级分配预算）
 ├── outline/            # 大纲层：梗概→卷→章节 beat
-├── pipeline/           # 写-检-改流水线：Planner / Writer / Checker
+├── pipeline/           # 写-检-改-富化流水线
+│   ├── planner.py      # 章节规划
+│   ├── writer.py       # 正文生成
+│   ├── checker.py      # 一致性校验
+│   └── post_write.py   # LLM 驱动富化：发现新实体、更新档案、标记矛盾
 ├── retrieval/          # 可选向量检索（ChromaDB）
 └── web/                # Web 层：FastAPI 后端 + 静态前端
     ├── backend/        # API 路由、SSE 流式、依赖注入
@@ -151,25 +207,37 @@ my_novel/
 
 ## 配置
 
-`config.yaml` 示例：
+**全局配置**（`.rimbook.yaml`，工作区根目录，所有项目共享）：
+
+```yaml
+llm:
+  base_url: https://api.openai.com/v1
+  api_key: ${LLM_API_KEY}
+  model: gpt-4o
+  check_model: gpt-4o-mini
+  embedding:
+    base_url: null
+    api_key: ${LLM_API_KEY}
+    model: text-embedding-3-small
+```
+
+**项目配置**（`my_novel/config.yaml`，每个项目独立）：
 
 ```yaml
 title: 我的小说
+author: 作者
 language: zh
-llm:
-  base_url: https://api.openai.com/v1   # 任意 OpenAI 兼容端点
-  api_key: ${LLM_API_KEY}                # 环境变量引用，避免硬编码
-  model: gpt-4o
-  check_model: gpt-4o-mini               # 校验用更便宜的模型
-  embedding:
-    model: text-embedding-3-small
 generation:
   temperature: 0.85
-  recent_window_chapters: 1              # 滑动窗口原文章数
-  summary_history: 6                     # 携带的章节摘要数
+  max_tokens: 4000
+  recent_window_chapters: 1
+  summary_history: 6
   auto_consistency_check: true
-  auto_fix: false                        # 是否自动修复
+  auto_fix: false
   max_fix_rounds: 2
+  codex_max_tokens: 2000
+  codex_entry_max_chars: 1500
+  auto_enrich: true    # 写完后自动运行 PostWrite 富化
 ```
 
 环境变量优先级高于配置文件，可覆盖任意字段。
@@ -209,11 +277,11 @@ npm run dev
 
 | 页面 | 功能 |
 |------|------|
-| **仪表盘** | 项目选择/创建、统计卡片、章节进度表、全书梗概 |
-| **设定集** | 按 6 种类型管理人物/世界观/地点/势力/物品/时间线，在线编辑档案 |
+| **仪表盘** | 项目选择/创建/删除、统计卡片、章节进度表、全书梗概 |
+| **设定集** | Tab 式布局（档案 / 章节发现 / 矛盾），按类型管理实体，在线编辑档案，Markdown 渲染 |
 | **大纲** | 树状浏览梗概→卷→章节，LLM 生成或手动编辑 beat |
-| **写作工作台** | 三栏布局：左栏上下文预览 / 中栏正文编辑器 / 右栏校验报告，SSE 流式生成 |
-| **设置** | LLM / Embedding / 生成参数配置 |
+| **写作工作台** | 三栏布局：左栏结构化上下文预览（实体卡片 / 状态卡片 / Token 指示器）/ 中栏正文编辑器 / 右栏校验报告 + 富化结果，SSE 流式生成 |
+| **设置** | 全局模型配置（所有项目共享）+ 项目生成参数 |
 
 ### 环境变量
 

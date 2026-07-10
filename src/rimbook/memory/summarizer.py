@@ -20,7 +20,7 @@ import yaml
 
 from ..llm import LLMClient, Prompts
 from ..outline.store import OutlineStore
-from .entity_state import EntityState, EntityStateStore
+from .entity_state import EntityState, EntityStateStore, KnowledgeItem, PossessionItem
 
 __all__ = ["Summarizer", "EntityDelta"]
 
@@ -145,13 +145,13 @@ class Summarizer:
             if d.status:
                 current.status = d.status
             if d.knowledge:
-                current.knowledge = _extend_unique(current.knowledge, d.knowledge)
+                current.knowledge = _extend_knowledge(current.knowledge, d.knowledge, chapter_number)
             if d.possessions:
-                current.possessions = _extend_unique(current.possessions, d.possessions)
+                current.possessions = _extend_possessions(current.possessions, d.possessions, chapter_number)
             if d.knowledge_remove:
-                current.knowledge = _subtract(current.knowledge, d.knowledge_remove)
+                current.knowledge = _subtract_knowledge(current.knowledge, d.knowledge_remove)
             if d.possessions_remove:
-                current.possessions = _subtract(current.possessions, d.possessions_remove)
+                current.possessions = _subtract_possessions(current.possessions, d.possessions_remove)
             if d.relationships:
                 for target_id, standing in d.relationships.items():
                     if standing is None or standing == "":
@@ -237,6 +237,38 @@ def _subtract(base: list[str], to_remove: list[str]) -> list[str]:
     """Remove items from *base*, matching case-insensitively. Preserves order."""
     remove_set = {x.lower() for x in to_remove}
     return [x for x in base if x.lower() not in remove_set]
+
+
+def _extend_knowledge(
+    base: list[KnowledgeItem], extra: list[str], chapter: int
+) -> list[KnowledgeItem]:
+    seen = {k.fact for k in base}
+    for fact in extra:
+        if fact and fact not in seen:
+            base.append(KnowledgeItem(fact=fact, source_chapter=chapter))
+            seen.add(fact)
+    return base
+
+
+def _extend_possessions(
+    base: list[PossessionItem], extra: list[str], chapter: int
+) -> list[PossessionItem]:
+    seen = {p.item for p in base}
+    for item in extra:
+        if item and item not in seen:
+            base.append(PossessionItem(item=item, acquired_chapter=chapter))
+            seen.add(item)
+    return base
+
+
+def _subtract_knowledge(base: list[KnowledgeItem], to_remove: list[str]) -> list[KnowledgeItem]:
+    remove_set = {x.lower() for x in to_remove}
+    return [k for k in base if k.fact.lower() not in remove_set]
+
+
+def _subtract_possessions(base: list[PossessionItem], to_remove: list[str]) -> list[PossessionItem]:
+    remove_set = {x.lower() for x in to_remove}
+    return [p for p in base if p.item.lower() not in remove_set]
 
 
 def _extend_unique(base: list[str], extra: list[str]) -> list[str]:

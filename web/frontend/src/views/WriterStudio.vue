@@ -61,6 +61,9 @@
               <el-button size="small" text @click="loadContext" :disabled="!chapterNum">
                 <el-icon><Refresh /></el-icon> 预览
               </el-button>
+              <el-button size="small" text @click="contextViewMode = contextViewMode === 'structured' ? 'raw' : 'structured'" :disabled="!contextText">
+                {{ contextViewMode === 'structured' ? '原始' : '结构化' }}
+              </el-button>
               <button class="expand-btn" @click="toggleExpand('context')" :title="expandedPanel === 'context' ? '收起' : '展开'">
                 <svg v-if="expandedPanel === 'context'" viewBox="0 0 16 16" fill="none" class="expand-icon"><path d="M4 1h11v11M1 4l11-3M12 15H1V4M15 12L4 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <svg v-else viewBox="0 0 16 16" fill="none" class="expand-icon"><path d="M1 5V1h4M15 11v4h-4M1 1l5 5M15 15l-5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -68,7 +71,99 @@
             </div>
           </div>
           <div class="panel-content">
-            <div v-if="contextText" class="context-text">{{ contextText }}</div>
+            <div v-if="contextText && contextViewMode === 'structured'" class="context-structured">
+              <div v-for="(sec, i) in structuredSections" :key="i" class="context-section" :class="{ collapsed: collapsedSections.has(i) }">
+                <div class="context-section-header" @click="toggleSection(i)">
+                  <span class="section-label">{{ sec.label }}</span>
+                  <span class="section-tokens">~{{ sec.tokens }} tokens</span>
+                </div>
+                <div v-if="!collapsedSections.has(i)" class="context-section-body">
+                  <!-- Codex: entity cards with full info -->
+                  <template v-if="sec.key === 'codex' && sec.entities?.length">
+                    <div v-for="ent in sec.entities" :key="ent.id" class="entity-card" :class="{ placeholder: ent.is_placeholder }">
+                      <div class="entity-card-header">
+                        <el-tag size="small" effect="dark" :type="ent.is_placeholder ? 'warning' : 'primary'">{{ ent.type_label }}</el-tag>
+                        <span class="entity-card-name">{{ ent.name }}</span>
+                        <code class="entity-card-id">{{ ent.id }}</code>
+                        <el-tag v-if="ent.is_placeholder" size="small" type="warning" effect="plain">占位符</el-tag>
+                      </div>
+                      <div v-if="ent.aliases?.length" class="entity-card-aliases">
+                        别名：<el-tag v-for="a in ent.aliases" :key="a" size="small" effect="plain">{{ a }}</el-tag>
+                      </div>
+                      <div v-if="ent.body" class="entity-card-body" v-html="renderMarkdown(ent.body)"></div>
+                      <div v-else class="entity-card-empty">（档案待补：此实体由系统自动创建，暂无静态档案。）</div>
+                      <div v-if="ent.revelations?.length" class="entity-card-revelations">
+                        <div class="entity-sub-header">📖 章节发现</div>
+                        <div v-for="r in ent.revelations" :key="r.chapter" class="entity-sub-item rev-item">
+                          <span class="rev-chapter">第{{ r.chapter }}章</span>
+                          <span class="rev-content">{{ r.content }}</span>
+                        </div>
+                      </div>
+                      <div v-if="ent.contradictions?.length" class="entity-card-contradictions">
+                        <div class="entity-sub-header">⚠️ 待审核矛盾</div>
+                        <div v-for="c in ent.contradictions" :key="c.chapter" class="entity-sub-item con-item" :class="{ resolved: c.resolved }">
+                          <el-tag size="small" :type="c.resolved ? 'success' : 'danger'" effect="plain">{{ c.resolved ? '已解决' : '未解决' }}</el-tag>
+                          <span class="con-chapter">第{{ c.chapter }}章</span>
+                          <span class="con-desc">{{ c.description }}</span>
+                          <div v-if="c.evidence" class="con-evidence">证据：{{ c.evidence }}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- Entity state: state cards -->
+                  <template v-else-if="sec.key === 'entity_state' && sec.sub_items?.length">
+                    <div v-for="st in sec.sub_items" :key="st.entity_id" class="state-card">
+                      <div class="state-card-header">
+                        <code>{{ st.entity_id }}</code>
+                        <span v-if="st.status" class="state-status">{{ st.status }}</span>
+                        <span v-if="st.location" class="state-location">📍 {{ st.location }}</span>
+                      </div>
+                      <div v-if="st.last_seen_chapter" class="state-meta">
+                        最后出现：第{{ st.last_seen_chapter }}章
+                      </div>
+                      <div v-if="st.knowledge?.length" class="state-list">
+                        <div class="state-list-label">已知信息：</div>
+                        <ul>
+                          <li v-for="(k, ki) in st.knowledge" :key="ki">{{ k }}</li>
+                        </ul>
+                      </div>
+                      <div v-if="st.possessions?.length" class="state-list">
+                        <div class="state-list-label">随身物品：</div>
+                        <ul>
+                          <li v-for="(p, pi) in st.possessions" :key="pi">{{ p }}</li>
+                        </ul>
+                      </div>
+                      <div v-if="st.relationships && Object.keys(st.relationships).length" class="state-list">
+                        <div class="state-list-label">人际关系：</div>
+                        <ul>
+                          <li v-for="(v, k) in st.relationships" :key="k">{{ k }}（{{ v }}）</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </template>
+
+                  <!-- Summaries: chapter summary cards -->
+                  <template v-else-if="sec.key === 'summaries' && sec.sub_items?.length">
+                    <div v-for="s in sec.sub_items" :key="s.chapter" class="summary-card">
+                      <span class="summary-chapter">第{{ s.chapter }}章</span>
+                      <span class="summary-text">{{ s.text }}</span>
+                    </div>
+                  </template>
+
+                  <!-- Beat: formatted beat info -->
+                  <template v-else-if="sec.key === 'beat'">
+                    <div class="section-preview">{{ sec.text }}</div>
+                  </template>
+
+                  <!-- Other sections: full text -->
+                  <template v-else>
+                    <div class="section-preview">{{ sec.text }}</div>
+                  </template>
+                </div>
+              </div>
+            </div>
+            <div v-else-if="contextText" class="context-text">{{ contextText }}</div>
             <div v-else class="panel-empty">
               <el-icon :size="28" class="panel-empty-icon"><View /></el-icon>
               <span>点击「预览」查看上下文</span>
@@ -160,6 +255,39 @@
           </div>
         </div>
 
+        <!-- Enrichment result -->
+        <div class="panel-card enrich-card" v-if="enrichmentResult">
+          <div class="panel-header">
+            <span class="panel-title">
+              <el-icon><MagicStick /></el-icon> 设定集扩充
+            </span>
+          </div>
+          <div class="panel-content">
+            <p class="enrich-summary">{{ enrichmentResult.summary }}</p>
+            <div v-if="enrichmentResult.created?.length" class="enrich-group">
+              <span class="enrich-label enrich-label--new">新增实体</span>
+              <div v-for="c in enrichmentResult.created" :key="c.id" class="enrich-item">
+                <el-tag size="small" type="success" effect="plain">{{ c.id }}</el-tag>
+                <span class="enrich-detail">{{ c.detail }}</span>
+              </div>
+            </div>
+            <div v-if="enrichmentResult.updated?.length" class="enrich-group">
+              <span class="enrich-label enrich-label--update">更新档案</span>
+              <div v-for="c in enrichmentResult.updated" :key="c.id" class="enrich-item">
+                <el-tag size="small" type="primary" effect="plain">{{ c.id }}</el-tag>
+                <span class="enrich-detail">{{ c.detail }}</span>
+              </div>
+            </div>
+            <div v-if="enrichmentResult.contradictions?.length" class="enrich-group">
+              <span class="enrich-label enrich-label--warn">待审核矛盾</span>
+              <div v-for="c in enrichmentResult.contradictions" :key="c.id" class="enrich-item">
+                <el-tag size="small" type="danger" effect="plain">{{ c.id }}</el-tag>
+                <span class="enrich-detail">{{ c.detail }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- Chapter beat summary -->
         <div class="panel-card beat-card" v-if="expandedPanel !== 'check'">
           <div class="panel-header">
@@ -238,14 +366,32 @@ import {
   writeChapterSSE, type ChapterOutline, type CheckIssue,
 } from '../api'
 import { ElMessage } from 'element-plus'
+import { marked } from 'marked'
 
 const store = useProjectStore()
 const chapterNum = ref<number | null>(null)
 const chapterList = ref<ChapterOutline[]>([])
 const draftText = ref('')
 const contextText = ref('')
+const contextViewMode = ref<'raw' | 'structured'>('structured')
+const collapsedSections = ref(new Set<number>())
+// Structured sections from API (data-driven, not parsed)
+interface EntitySubInfo {
+  id: string; name: string; type: string; type_label: string
+  aliases: string[]; body: string
+  revelations: { chapter: number; content: string; source: string }[]
+  contradictions: { chapter: number; description: string; evidence: string; resolved: boolean }[]
+  is_placeholder: boolean
+}
+interface SectionData {
+  key: string; label: string; text: string; tokens: number
+  entities?: EntitySubInfo[]
+  sub_items?: Record<string, any>[]
+}
+const contextSections = ref<SectionData[]>([])
 const currentBeat = ref<ChapterOutline | null>(null)
 const checkReport = ref<{ overall: string; summary: string; issues: CheckIssue[] } | null>(null)
+const enrichmentResult = ref<{ created: { id: string; detail: string }[]; updated: { id: string; detail: string }[]; contradictions: { id: string; detail: string }[]; summary: string } | null>(null)
 
 const writing = ref(false)
 const checking = ref(false)
@@ -302,6 +448,27 @@ function sevColor(s: string) {
   return s === 'high' ? 'danger' : s === 'medium' ? 'warning' : 'info'
 }
 
+// Structured context view — data-driven from API section_list
+interface ContextSection { label: string; text: string; tokens: number; sub?: ContextSection[]; entities?: EntitySubInfo[]; sub_items?: Record<string, any>[]; key: string }
+
+const structuredSections = computed<ContextSection[]>(() => {
+  if (!contextSections.value.length) return []
+  return contextSections.value.map(sec => ({
+    key: sec.key,
+    label: sec.label,
+    text: sec.text,
+    tokens: sec.tokens,
+    entities: sec.entities,
+    sub_items: sec.sub_items,
+    sub: (sec.entities || sec.sub_items) ? [] : undefined,
+  }))
+})
+function renderMarkdown(text: string): string {
+  if (!text) return ''
+  try { return marked.parse(text) as string } catch { return text }
+}
+function toggleSection(i: number) { collapsedSections.value.has(i) ? collapsedSections.value.delete(i) : collapsedSections.value.add(i) }
+
 async function fetchChapterList() {
   if (!store.currentId) return
   chapterList.value = await listChapters(store.currentId)
@@ -322,8 +489,9 @@ async function loadChapter() {
 async function loadContext() {
   if (!store.currentId || !chapterNum.value) return
   try {
-    const r = await previewContext(store.currentId, chapterNum.value)
+    const r = await previewContext(store.currentId, chapterNum.value) as any
     contextText.value = r.text
+    contextSections.value = r.section_list || []
   } catch (e: any) { ElMessage.error('预览失败') }
 }
 
@@ -344,6 +512,9 @@ async function doWrite() {
     },
     onCheck: (data) => {
       checkReport.value = data as any
+    },
+    onEnrichment: (data) => {
+      enrichmentResult.value = data as any
     },
     onError: (msg) => { ElMessage.error(msg) },
     onDone: async () => {
@@ -954,4 +1125,61 @@ onMounted(fetchChapterList)
     min-height: 300px;
   }
 }
+
+/* Structured context */
+.context-structured { display: flex; flex-direction: column; gap: 8px; }
+.context-section { border: 1px solid var(--rb-border-light); border-radius: 8px; overflow: hidden; }
+.context-section.collapsed { opacity: 0.5; }
+.context-section-header { display: flex; justify-content: space-between; align-items: center; padding: 9px 14px; background: var(--rb-bg-subtle); cursor: pointer; user-select: none; font-size: 13px; font-weight: 600; }
+.context-section-header:hover { background: var(--rb-primary-bg); }
+.section-label { color: var(--rb-text-primary); font-size: 13px; }
+.section-tokens { font-size: 11px; color: var(--rb-text-muted); background: var(--rb-bg-surface); padding: 2px 8px; border-radius: 10px; font-weight: 500; flex-shrink: 0; }
+.context-section-body { padding: 10px 14px; font-size: 12px; line-height: 1.7; color: var(--rb-text-secondary); background: var(--rb-bg-surface); max-height: 400px; overflow-y: auto; }
+.section-preview { white-space: pre-wrap; word-break: break-word; }
+
+/* Entity cards (codex section) */
+.entity-card { border: 1px solid var(--rb-border-light); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: var(--rb-bg-subtle); }
+.entity-card:last-child { margin-bottom: 0; }
+.entity-card.placeholder { border-color: #e6a23c66; background: #fdf6ec; }
+.entity-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.entity-card-name { font-weight: 700; font-size: 14px; color: var(--rb-text-primary); }
+.entity-card-id { font-size: 11px; color: var(--rb-text-muted); background: var(--rb-bg-base); padding: 1px 6px; border-radius: 4px; font-family: monospace; }
+.entity-card-aliases { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; flex-wrap: wrap; font-size: 12px; color: var(--rb-text-muted); }
+.entity-card-body { font-size: 12px; line-height: 1.7; color: var(--rb-text-primary); margin-bottom: 8px; }
+.entity-card-body :deep(h3) { font-size: 13px; margin: 8px 0 4px; }
+.entity-card-body :deep(h4) { font-size: 12px; margin: 6px 0 4px; }
+.entity-card-body :deep(ul) { padding-left: 18px; margin: 4px 0; }
+.entity-card-body :deep(li) { margin-bottom: 2px; }
+.entity-card-empty { font-size: 12px; color: var(--rb-text-muted); font-style: italic; margin-bottom: 8px; }
+.entity-sub-header { font-size: 11px; font-weight: 600; color: var(--rb-text-secondary); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
+.entity-sub-item { font-size: 12px; padding: 4px 0; border-bottom: 1px solid #f0f0f0; }
+.entity-sub-item:last-child { border-bottom: none; }
+.entity-card-revelations, .entity-card-contradictions { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--rb-border-light); }
+.rev-item { display: flex; gap: 6px; }
+.rev-chapter { font-weight: 600; color: var(--rb-primary); white-space: nowrap; flex-shrink: 0; }
+.rev-content { color: var(--rb-text-secondary); }
+.con-item { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }
+.con-item.resolved { opacity: 0.6; }
+.con-chapter { font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+.con-desc { color: var(--rb-text-primary); }
+.con-evidence { font-size: 11px; color: var(--rb-text-muted); width: 100%; padding-left: 4px; margin-top: 2px; }
+
+/* State cards */
+.state-card { border: 1px solid var(--rb-border-light); border-radius: 8px; padding: 10px; margin-bottom: 8px; background: var(--rb-bg-subtle); }
+.state-card:last-child { margin-bottom: 0; }
+.state-card-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.state-card-header code { font-size: 12px; color: var(--rb-primary); background: var(--rb-primary-bg); padding: 2px 6px; border-radius: 4px; }
+.state-status { font-size: 12px; font-weight: 500; color: var(--rb-text-primary); }
+.state-location { font-size: 11px; color: var(--rb-text-muted); }
+.state-meta { font-size: 11px; color: var(--rb-text-muted); margin-bottom: 4px; }
+.state-list { margin-bottom: 4px; }
+.state-list-label { font-size: 11px; font-weight: 600; color: var(--rb-text-secondary); }
+.state-list ul { padding-left: 16px; margin: 2px 0; }
+.state-list li { font-size: 12px; color: var(--rb-text-primary); line-height: 1.5; }
+
+/* Summary cards */
+.summary-card { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid #f5f5f5; }
+.summary-card:last-child { border-bottom: none; }
+.summary-chapter { font-weight: 600; color: var(--rb-primary); white-space: nowrap; flex-shrink: 0; font-size: 12px; }
+.summary-text { font-size: 12px; color: var(--rb-text-secondary); line-height: 1.5; }
 </style>

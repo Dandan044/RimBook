@@ -40,6 +40,8 @@ def sync_codex_from_states(
     entity_ids: list[str],
     entity_store: EntityStateStore,
     codex_store: CodexStore,
+    *,
+    create_placeholders: bool = True,
 ) -> list[str]:
     """Bring the codex in line with tracked entity states.
 
@@ -63,6 +65,8 @@ def sync_codex_from_states(
             entry = codex_store.read(eid)
             created = False
         except FileNotFoundError:
+            if not create_placeholders:
+                continue
             entry = _make_placeholder(eid, state)
             codex_store.write(entry)
             touched.append(eid)
