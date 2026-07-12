@@ -15,7 +15,7 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 
-from .routes import codex, outline, projects, status, writer
+from .routes import codex, outline, projects, server, status, writer
 
 app = FastAPI(
     title="RimBook",
@@ -43,6 +43,7 @@ app.include_router(status.router)
 app.include_router(codex.router)
 app.include_router(outline.router)
 app.include_router(writer.router)
+app.include_router(server.router)
 
 # ---------------------------------------------------------------------------
 # Global workspace config routes (not tied to any project)
@@ -160,7 +161,34 @@ if _static_dir.exists() and any(_static_dir.iterdir()):
 
 def main():
     """CLI entry point: ``rimbook-web`` or ``python -m rimbook.web``."""
+    import socket
+    import sys
+    import time
     import uvicorn
+    from rimbook.web.launcher import _write_pid, _delete_pid_files
+
     host = os.environ.get("RIMBOOK_HOST", "0.0.0.0")
     port = int(os.environ.get("RIMBOOK_PORT", "8000"))
-    uvicorn.run(app, host=host, port=port)
+
+    # Support bind-retry for seamless restart (the old process may not have
+    # released the port yet).  Set via RIMBOOK_BIND_RETRY env var.
+    max_retries = int(os.environ.get("RIMBOOK_BIND_RETRY", "0"))
+    for attempt in range(max_retries + 1):
+        try:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind((host if host != "0.0.0.0" else "127.0.0.1", port))
+            probe.close()
+            break  # port free — proceed
+        except OSError:
+            if attempt < max_retries:
+                time.sleep(1)
+            # else: last attempt, let uvicorn report the error naturally
+
+    # Persist PID + port so the launcher / frontend can query status.
+    _write_pid(os.getpid(), port)
+
+    try:
+        uvicorn.run(app, host=host, port=port)
+    finally:
+        _delete_pid_files()

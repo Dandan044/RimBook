@@ -235,6 +235,36 @@ export function writeChapterSSE(
   return es
 }
 
+// ---------- Server management ----------
+
+export interface ServerStatus {
+  running: boolean
+  pid: number | null
+  port: number | null
+  url: string | null
+}
+
+export interface ServerResult {
+  running: boolean
+  pid?: number
+  port?: number
+  url?: string
+  action?: string
+  error?: string
+}
+
+export const getServerStatus = () =>
+  http.get<ServerStatus>('/server/status').then(r => r.data)
+
+export const startServer = (data?: { workspace?: string; port?: number }) =>
+  http.post<ServerResult>('/server/start', data || {}).then(r => r.data)
+
+export const stopServer = () =>
+  http.post<ServerResult>('/server/stop').then(r => r.data)
+
+export const restartServer = (data?: { workspace?: string; port?: number }) =>
+  http.post<ServerResult>('/server/restart', data || {}).then(r => r.data)
+
 // ---------- Snapshots ----------
 
 export const listSnapshots = (projectId: string) =>

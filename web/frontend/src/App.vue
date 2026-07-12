@@ -39,6 +39,38 @@
         </el-menu-item>
       </el-menu>
       <div class="sidebar-footer">
+        <!-- ---- Server management ---- -->
+        <div class="server-status-area">
+          <div class="server-status-row" :class="{ collapsed: collapsed }">
+            <el-tooltip :content="serverTooltip" placement="right" :disabled="!collapsed">
+              <span class="server-dot" :class="serverDotClass"></span>
+            </el-tooltip>
+            <transition name="logo-text">
+              <div v-if="!collapsed" class="server-info">
+                <span class="server-label">{{ serverLabel }}</span>
+              </div>
+            </transition>
+          </div>
+          <transition name="logo-text">
+            <div v-if="!collapsed && serverStatus?.running" class="server-actions">
+              <el-button size="small" text @click="doRestartServer" :loading="serverActionLoading === 'restart'" class="server-action-btn">
+                <el-icon :size="12"><Refresh /></el-icon> 重启
+              </el-button>
+              <el-button size="small" text @click="doStopServer" :loading="serverActionLoading === 'stop'" class="server-action-btn server-stop-btn">
+                <el-icon :size="12"><Close /></el-icon> 停止
+              </el-button>
+            </div>
+          </transition>
+          <transition name="logo-text">
+            <div v-if="!collapsed && !serverStatus?.running" class="server-actions">
+              <el-button size="small" text @click="doStartServer" :loading="serverActionLoading === 'start'" class="server-action-btn">
+                <el-icon :size="12"><VideoPlay /></el-icon> 启动
+              </el-button>
+            </div>
+          </transition>
+        </div>
+        <div class="sidebar-separator"></div>
+        <!-- ---- Theme toggle ---- -->
         <div class="theme-toggle" @click="toggleTheme">
           <el-icon :size="16">
             <Moon v-if="!isDark" />
@@ -72,6 +104,13 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
+import {
+  getServerStatus,
+  startServer,
+  stopServer,
+  restartServer,
+  type ServerStatus,
+} from './api'
 
 const route = useRoute()
 const currentRoute = computed(() => route.path)
@@ -120,10 +159,108 @@ onMounted(() => {
       applyTheme(true, false)
     }
   } catch {}
+  // Start server status polling
+  startServerPolling()
 })
 onUnmounted(() => {
   window.removeEventListener('resize', onResize)
+  stopServerPolling()
 })
+
+// ===== Server management =====
+const serverStatus = ref<ServerStatus | null>(null)
+const serverActionLoading = ref<string | null>(null)
+let _serverPollTimer: ReturnType<typeof setInterval> | null = null
+
+const serverDotClass = computed(() => {
+  if (serverActionLoading.value) return 'server-dot-busy'
+  if (serverStatus.value?.running) return 'server-dot-online'
+  return 'server-dot-offline'
+})
+
+const serverLabel = computed(() => {
+  if (serverActionLoading.value === 'start') return '正在启动…'
+  if (serverActionLoading.value === 'stop') return '正在停止…'
+  if (serverActionLoading.value === 'restart') return '正在重启…'
+  if (serverStatus.value?.running) {
+    const port = serverStatus.value.port
+    return port ? `服务运行中 :${port}` : '服务运行中'
+  }
+  return '服务已停止'
+})
+
+const serverTooltip = computed(() => {
+  if (serverStatus.value?.running) {
+    const port = serverStatus.value.port
+    return port ? `运行中 — 端口 ${port}` : '运行中'
+  }
+  return '服务已停止'
+})
+
+async function fetchServerStatus() {
+  try {
+    serverStatus.value = await getServerStatus()
+  } catch {
+    // If the server is down the request itself will fail — that's expected.
+    serverStatus.value = { running: false, pid: null, port: null, url: null }
+  }
+}
+
+function startServerPolling() {
+  stopServerPolling()
+  fetchServerStatus()
+  _serverPollTimer = setInterval(fetchServerStatus, 5000)
+}
+
+function stopServerPolling() {
+  if (_serverPollTimer !== null) {
+    clearInterval(_serverPollTimer)
+    _serverPollTimer = null
+  }
+}
+
+async function doStartServer() {
+  serverActionLoading.value = 'start'
+  try {
+    const result = await startServer()
+    if (result.url) {
+      window.open(result.url, '_blank')
+    }
+    await fetchServerStatus()
+  } catch (e: any) {
+    console.error('Failed to start server:', e)
+  } finally {
+    serverActionLoading.value = null
+  }
+}
+
+async function doStopServer() {
+  serverActionLoading.value = 'stop'
+  try {
+    await stopServer()
+    await fetchServerStatus()
+  } catch (e: any) {
+    console.error('Failed to stop server:', e)
+  } finally {
+    serverActionLoading.value = null
+  }
+}
+
+async function doRestartServer() {
+  serverActionLoading.value = 'restart'
+  try {
+    const result = await restartServer()
+    if (result.url) {
+      window.open(result.url, '_blank')
+    }
+    await fetchServerStatus()
+  } catch (e: any) {
+    console.error('Failed to restart server:', e)
+  } finally {
+    serverActionLoading.value = null
+  }
+}
+
 </script>
 
 <style>
@@ -334,6 +471,103 @@ html, body, #app { margin: 0; padding: 0; height: 100%; }
 .app-menu::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.1);
   border-radius: 2px;
+}
+
+/* ===== Server management in sidebar ===== */
+.server-status-area {
+  padding: 4px 8px;
+  margin-bottom: 4px;
+}
+
+.server-status-row {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 8px 4px;
+  border-radius: 8px;
+  transition: background var(--rb-transition-fast);
+}
+
+.server-status-row.collapsed {
+  justify-content: center;
+  padding: 6px 0;
+}
+
+.server-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  transition: background-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+.server-dot-online {
+  background: #10b981;
+  box-shadow: 0 0 6px rgba(16, 185, 129, 0.5);
+}
+
+.server-dot-offline {
+  background: #6e7681;
+  box-shadow: none;
+}
+
+.server-dot-busy {
+  background: #f59e0b;
+  box-shadow: 0 0 6px rgba(245, 158, 11, 0.5);
+  animation: dot-pulse 1s ease-in-out infinite;
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.server-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.server-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--rb-sidebar-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: block;
+}
+
+.server-status-area:hover .server-label {
+  color: var(--rb-sidebar-text-hover);
+}
+
+.server-actions {
+  display: flex;
+  gap: 2px;
+  padding: 2px 0 4px 0;
+}
+
+.server-action-btn {
+  --el-button-text-color: var(--rb-sidebar-text) !important;
+  --el-button-hover-text-color: var(--rb-sidebar-text-hover) !important;
+  font-size: 11px !important;
+  padding: 2px 6px !important;
+  height: auto !important;
+  min-height: 24px !important;
+}
+
+.server-action-btn:hover {
+  background: var(--rb-sidebar-hover) !important;
+}
+
+.server-stop-btn {
+  --el-button-hover-text-color: #f87171 !important;
+}
+
+.sidebar-separator {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.06);
+  margin: 2px 8px;
 }
 
 /* ===== Collapsed menu adjustments ===== */
