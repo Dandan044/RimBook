@@ -17,7 +17,7 @@ from fastapi import Depends, HTTPException
 
 from rimbook.config import Config, GenerationConfig, load_config
 from rimbook.codex import CodexEntry, CodexStore
-from rimbook.llm import LLMClient, Prompts
+from rimbook.llm import LLMClient, Prompts, load_prompts
 from rimbook.memory import (
     ContextAssembler,
     EntityStateStore,
@@ -27,8 +27,6 @@ from rimbook.memory import (
 from rimbook.outline import OutlineStore
 from rimbook.pipeline import Checker, Planner, Writer, PostWritePipeline
 from rimbook.project import ProjectPaths, scaffold_project
-
-PROMPTS = Prompts()
 
 
 def workspace_root() -> Path:
@@ -49,12 +47,20 @@ class ProjectDeps:
         self.config = load_config(project_dir)
         self.paths = ProjectPaths(root=project_dir)
         self._llm: LLMClient | None = None
+        self._prompts: Prompts | None = None
 
     @property
     def llm(self) -> LLMClient:
         if self._llm is None:
             self._llm = LLMClient(self.config.llm)
         return self._llm
+
+    @property
+    def prompts(self) -> Prompts:
+        # Workspace-level overrides from <workspace>/prompts.yaml.
+        if self._prompts is None:
+            self._prompts = load_prompts(workspace_root())
+        return self._prompts
 
     @property
     def codex(self) -> CodexStore:
@@ -85,14 +91,14 @@ class ProjectDeps:
 
     @property
     def summarizer(self) -> Summarizer:
-        return Summarizer(self.llm, PROMPTS, self.outline)
+        return Summarizer(self.llm, self.prompts, self.outline)
 
     @property
     def writer(self) -> Writer:
         return Writer(
             self.paths,
             llm=self.llm,
-            prompts=PROMPTS,
+            prompts=self.prompts,
             outline=self.outline,
             assembler=self.assembler,
             summarizer=self.summarizer,
@@ -103,17 +109,17 @@ class ProjectDeps:
 
     @property
     def planner(self) -> Planner:
-        return Planner(self.llm, PROMPTS, self.outline)
+        return Planner(self.llm, self.prompts, self.outline)
 
     @property
     def checker(self) -> Checker:
-        return Checker(self.paths, llm=self.llm, prompts=PROMPTS)
+        return Checker(self.paths, llm=self.llm, prompts=self.prompts)
 
     @property
     def enricher(self) -> PostWritePipeline:
         return PostWritePipeline(
             llm=self.llm,
-            prompts=PROMPTS,
+            prompts=self.prompts,
             codex=self.codex,
             entity_state=self.entity_state,
             summarizer=self.summarizer,

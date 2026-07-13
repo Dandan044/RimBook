@@ -91,11 +91,9 @@ class Writer:
         # 2. Generate.
         messages = self.llm.as_chat(
             system=self.prompts.writer_system,
-            user=(
-                "请根据以下结构化上下文，撰写第 "
-                f"{number} 章的完整正文。\n\n"
-                f"{context.text}\n\n"
-                "现在请直接开始写正文。"
+            user=self.prompts.writer_user.format(
+                number=number,
+                context=context.text,
             ),
         )
         gen = self.llm.generate(
@@ -161,15 +159,12 @@ class Writer:
             draft_text = path.read_text(encoding="utf-8").strip()
 
         context = self.assembler.assemble_for_chapter(chapter)
-        user = (
-            "请根据以下结构化上下文，修订第 "
-            f"{number} 章的正文。\n\n"
-            f"{context.text}\n\n"
-            f"--- 当前正文 ---\n{draft_text}\n"
+        user = self.prompts.writer_revise_user.format(
+            number=number,
+            context=context.text,
+            draft_text=draft_text,
+            instructions=instructions,
         )
-        if instructions:
-            user += f"\n--- 修订要求 ---\n{instructions}\n"
-        user += "\n请输出修订后的完整正文。"
 
         messages = self.llm.as_chat(system=self.prompts.writer_system, user=user)
         gen = self.llm.generate(messages, temperature=0.7)

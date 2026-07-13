@@ -56,10 +56,7 @@ class Planner:
         """Generate the whole-novel synopsis from a short premise."""
         messages = self.llm.as_chat(
             system=self.prompts.synopsis_system,
-            user=(
-                "请根据以下创意，撰写全书梗概：\n\n"
-                f"{premise}\n"
-            ),
+            user=self.prompts.synopsis_user.format(premise=premise),
         )
         result = self.llm.generate(messages, temperature=0.8)
         text = result.content.strip()
@@ -78,10 +75,11 @@ class Planner:
 
         messages = self.llm.as_chat(
             system=self.prompts.volume_system,
-            user=(
-                f"全书梗概：\n{synopsis}\n\n"
-                f"已有卷目：\n{existing_desc or '（无）'}\n\n"
-                f"请规划第 {number} 卷" + (f"（标题：{title}）" if title else "") + "。"
+            user=self.prompts.volume_user.format(
+                synopsis=synopsis,
+                existing_desc=existing_desc or "（无）",
+                number=number,
+                title_hint=(f"（标题：{title}）" if title else ""),
             ),
         )
         result = self.llm.generate(messages, temperature=0.8)
@@ -144,14 +142,16 @@ class Planner:
 
         messages = self.llm.as_chat(
             system=self.prompts.chapter_outline_system,
-            user=(
-                f"全书梗概：\n{synopsis}\n\n"
-                + (f"本卷大纲：\n{volume_arc}\n\n" if volume_arc else "")
-                + (f"近几章梗概：\n{prev_desc}\n\n" if prev_desc else "")
-                + (f"{entity_registry}\n\n" if entity_registry else "")
-                + (f"作者提示：\n{hint}\n\n" if hint else "")
-                + f"请为第 {number} 章生成章节 beat。"
-                + (f"标题：{title}" if title else "")
+            user=self.prompts.chapter_outline_user.format(
+                synopsis=synopsis,
+                volume_arc_block=(f"本卷大纲：\n{volume_arc}\n\n" if volume_arc else ""),
+                prev_desc_block=(f"近几章梗概：\n{prev_desc}\n\n" if prev_desc else ""),
+                entity_registry_block=(
+                    f"{entity_registry}\n\n" if entity_registry else ""
+                ),
+                hint_block=(f"作者提示：\n{hint}\n\n" if hint else ""),
+                number=number,
+                title_block=(f"标题：{title}" if title else ""),
             ),
         )
         # Ask for JSON so we can parse beats + entities reliably.

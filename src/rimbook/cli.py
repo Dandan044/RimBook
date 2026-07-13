@@ -25,7 +25,7 @@ from rich.table import Table
 from . import __version__
 from .codex import CodexEntry, CodexStore
 from .config import load_config
-from .llm import LLMClient, Prompts
+from .llm import LLMClient, Prompts, load_prompts
 from .memory import (
     ContextAssembler,
     EntityStateStore,
@@ -45,6 +45,7 @@ app = typer.Typer(
 console = Console()
 
 # Shared, immutable prompt bundle.
+# Overridden per project via the workspace-level prompts.yaml (see Deps.prompts).
 PROMPTS = Prompts()
 
 
@@ -59,12 +60,24 @@ class Deps:
         self.config = load_config(project_dir)
         self.paths = ProjectPaths(root=project_dir)
         self._llm: LLMClient | None = None
+        self._prompts: Prompts | None = None
 
     @property
     def llm(self) -> LLMClient:
         if self._llm is None:
             self._llm = LLMClient(self.config.llm)
         return self._llm
+
+    @property
+    def prompts(self) -> Prompts:
+        # Workspace-level overrides from <workspace>/prompts.yaml.
+        if self._prompts is None:
+            try:
+                ws = self.project_dir.parent.resolve()
+            except Exception:
+                ws = self.project_dir.parent
+            self._prompts = load_prompts(ws)
+        return self._prompts
 
     @property
     def codex(self) -> CodexStore:
@@ -96,14 +109,14 @@ class Deps:
 
     @property
     def summarizer(self) -> Summarizer:
-        return Summarizer(self.llm, PROMPTS, self.outline)
+        return Summarizer(self.llm, self.prompts, self.outline)
 
     @property
     def writer(self) -> Writer:
         return Writer(
             self.paths,
             llm=self.llm,
-            prompts=PROMPTS,
+            prompts=self.prompts,
             outline=self.outline,
             assembler=self.assembler,
             summarizer=self.summarizer,
@@ -114,11 +127,11 @@ class Deps:
 
     @property
     def planner(self) -> Planner:
-        return Planner(self.llm, PROMPTS, self.outline, codex=self.codex)
+        return Planner(self.llm, self.prompts, self.outline, codex=self.codex)
 
     @property
     def checker(self) -> Checker:
-        return Checker(self.paths, llm=self.llm, prompts=PROMPTS)
+        return Checker(self.paths, llm=self.llm, prompts=self.prompts)
 
 
 def _resolve_project(project: Optional[Path]) -> Path:
@@ -538,7 +551,7 @@ def enrich(
 
     enricher = PostWritePipeline(
         llm=deps.llm,
-        prompts=PROMPTS,
+        prompts=deps.prompts,
         codex=deps.codex,
         entity_state=deps.entity_state,
         summarizer=deps.summarizer,

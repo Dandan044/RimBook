@@ -280,3 +280,53 @@ export const testLLM = (projectId: string) =>
 
 export const testEmbedding = (projectId: string) =>
   http.post<{ ok: boolean; model?: string; dimensions?: number; error?: string }>(`/projects/${projectId}/test-embedding`).then(r => r.data)
+
+// ---------- Prompts / Workflow ----------
+
+export interface PromptPlaceholder {
+  name: string
+  desc: string
+  source: string
+}
+
+export interface PromptEntry {
+  key: string
+  stage: string
+  role: string
+  zh_name: string
+  zh_module: string
+  description: string
+  placeholders: PromptPlaceholder[]
+  in_use: boolean
+  default_value: string
+  value: string
+  overridden: boolean
+}
+
+export const getPrompts = () =>
+  http.get<{ prompts: PromptEntry[]; stages: string[] }>('/prompts').then(r => {
+    // Guard against a stale backend serving the SPA HTML for /api/prompts
+    // (would otherwise surface as "undefined has no property length").
+    if (typeof r.data !== 'object' || r.data == null || !Array.isArray(r.data.prompts)) {
+      throw new Error('后端返回格式异常：请重启后端以加载新的 /api/prompts 路由。')
+    }
+    return r.data
+  })
+
+export const updatePrompt = (key: string, value: string) =>
+  http.put<PromptEntry>(`/prompts/${encodeURIComponent(key)}`, { value }).then(r => r.data)
+
+export const resetPrompt = (key: string) =>
+  http.delete<PromptEntry>(`/prompts/${encodeURIComponent(key)}`).then(r => r.data)
+
+export const resetAllPrompts = () =>
+  http.post<{ ok: boolean }>('/prompts/reset').then(r => r.data)
+
+export const previewPrompt = (
+  projectId: string,
+  key: string,
+  params: { number?: number; premise?: string; instructions?: string } = {},
+) =>
+  http.get<{ rendered: string }>(`/projects/${projectId}/prompts/${encodeURIComponent(key)}/preview`, {
+    params: { number: params.number ?? 1, premise: params.premise ?? '', instructions: params.instructions ?? '' },
+  }).then(r => r.data)

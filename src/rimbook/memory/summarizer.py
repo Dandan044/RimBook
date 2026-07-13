@@ -58,9 +58,9 @@ class Summarizer:
         """Generate and persist a summary for a written chapter."""
         messages = self.llm.as_chat(
             system=self.prompts.summarize_system,
-            user=(
-                f"这是第 {chapter_number} 章的正文，请生成章节摘要。\n\n"
-                f"---\n{chapter_text}\n"
+            user=self.prompts.summarize_user.format(
+                chapter_number=chapter_number,
+                chapter_text=chapter_text,
             ),
         )
         result = self.llm.generate(
@@ -83,36 +83,11 @@ class Summarizer:
         if not entity_ids:
             return []
         messages = self.llm.as_chat(
-            system=(
-                "你是精确的小说状态跟踪助手。阅读章节正文，针对每个指定实体，"
-                "判断其在『本章之后』的当前状态变化，并输出 JSON。\n"
-                "只包含发生了变化或需要记录的字段；未变化的字段省略或留空。\n"
-                "【生命周期规则 —— 重要】\n"
-                "- knowledge/possessions 表示『本章新获得』的信息/物品；\n"
-                "- knowledge_remove/possessions_remove 表示『本章遗忘/丢失』的信息/物品；\n"
-                "- relationships 为 {对方id: 关系简述}；若关系终结/破裂，将值设为 null；\n"
-                "- location/status 为本章结束时的最新值（会覆盖前值）。\n"
-                "角色丢失物品、遗忘信息、关系破裂都必须如实记录到对应的 remove / null 字段。"
-            ),
-            user=(
-                f"第 {chapter_number} 章正文：\n---\n{chapter_text}\n---\n\n"
-                f"需要跟踪的实体 id：{entity_ids}\n\n"
-                "请输出 JSON，格式为：\n"
-                '{\n'
-                '  "entities": [\n'
-                '    {\n'
-                '      "entity_id": "...",\n'
-                '      "location": "...",\n'
-                '      "status": "...",\n'
-                '      "knowledge": ["新获得的信息"],\n'
-                '      "possessions": ["新获得的物品"],\n'
-                '      "knowledge_remove": ["遗忘/过时的信息"],\n'
-                '      "possessions_remove": ["丢失/消耗的物品"],\n'
-                '      "relationships": {"id": "关系", "结束的id": null}\n'
-                '    }\n'
-                '  ]\n'
-                '}\n'
-                "只输出 JSON。"
+            system=self.prompts.entity_delta_system,
+            user=self.prompts.entity_delta_user.format(
+                chapter_number=chapter_number,
+                chapter_text=chapter_text,
+                entity_ids=entity_ids,
             ),
         )
         data = self.llm.generate_json(

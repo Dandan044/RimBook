@@ -16,9 +16,14 @@ from dataclasses import dataclass
 __all__ = ["Prompts"]
 
 
-@dataclass(frozen=True)
+@dataclass
 class Prompts:
-    """Bundle of prompt templates. Stateless; safe to share."""
+    """Bundle of prompt templates.
+
+    Mutable so workspace-level overrides can be applied via
+    :mod:`rimbook.llm.prompts_store`; the in-process instance is shared per
+    project and not mutated after wiring.
+    """
 
     # ------------------------------------------------------------------
     # Outline planning
@@ -29,10 +34,18 @@ class Prompts:
         "世界观核心设定、以及预期结局。控制在 600-900 字。"
     )
 
+    synopsis_user: str = "请根据以下创意，撰写全书梗概：\n\n{premise}\n"
+
     volume_system: str = (
         "你是一位资深小说策划。根据全书梗概与既有卷目录要，规划下一卷的"
         "「卷大纲」。要求：本卷的主线推进、核心冲突、出场的主要实体、"
         "关键场景与转折、以及与下一卷的衔接。控制在 400-600 字。"
+    )
+
+    volume_user: str = (
+        "全书梗概：\n{synopsis}\n\n"
+        "已有卷目：\n{existing_desc}\n\n"
+        "请规划第 {number} 卷{title_hint}。"
     )
 
     chapter_outline_system: str = (
@@ -56,6 +69,15 @@ class Prompts:
         "不要输出任何额外文字或代码块标记。"
     )
 
+    chapter_outline_user: str = (
+        "全书梗概：\n{synopsis}\n\n"
+        "{volume_arc_block}"
+        "{prev_desc_block}"
+        "{entity_registry_block}"
+        "{hint_block}"
+        "请为第 {number} 章生成章节 beat。{title_block}"
+    )
+
     # ------------------------------------------------------------------
     # Chapter writing
     # ------------------------------------------------------------------
@@ -70,6 +92,20 @@ class Prompts:
         "6. 输出纯净的小说正文，不要任何标题、注释或元说明。"
     )
 
+    writer_user: str = (
+        "请根据以下结构化上下文，撰写第 {number} 章的完整正文。\n\n"
+        "{context}\n\n"
+        "现在请直接开始写正文。"
+    )
+
+    writer_revise_user: str = (
+        "请根据以下结构化上下文，修订第 {number} 章的正文。\n\n"
+        "{context}\n\n"
+        "--- 当前正文 ---\n{draft_text}\n"
+        "--- 修订要求 ---\n{instructions}\n"
+        "请输出修订后的完整正文。"
+    )
+
     # ------------------------------------------------------------------
     # Summarization
     # ------------------------------------------------------------------
@@ -81,6 +117,44 @@ class Prompts:
         "- 新引入或回收的设定/伏笔；\n"
         "- 任何与后续剧情相关的未解悬念。\n"
         "客观陈述事实，不要文学润色。控制在 250-400 字。"
+    )
+
+    summarize_user: str = (
+        "这是第 {chapter_number} 章的正文，请生成章节摘要。\n\n"
+        "---\n{chapter_text}\n"
+    )
+
+    entity_delta_system: str = (
+        "你是精确的小说状态跟踪助手。阅读章节正文，针对每个指定实体，"
+        "判断其在『本章之后』的当前状态变化，并输出 JSON。\n"
+        "只包含发生了变化或需要记录的字段；未变化的字段省略或留空。\n"
+        "【生命周期规则 —— 重要】\n"
+        "- knowledge/possessions 表示『本章新获得』的信息/物品；\n"
+        "- knowledge_remove/possessions_remove 表示『本章遗忘/丢失』的信息/物品；\n"
+        "- relationships 为 {{对方id: 关系简述}}；若关系终结/破裂，将值设为 null；\n"
+        "- location/status 为本章结束时的最新值（会覆盖前值）。\n"
+        "角色丢失物品、遗忘信息、关系破裂都必须如实记录到对应的 remove / null 字段。"
+    )
+
+    entity_delta_user: str = (
+        "第 {chapter_number} 章正文：\n---\n{chapter_text}\n---\n\n"
+        "需要跟踪的实体 id：{entity_ids}\n\n"
+        "请输出 JSON，格式为：\n"
+        '{{\n'
+        '  "entities": [\n'
+        '    {{\n'
+        '      "entity_id": "...",\n'
+        '      "location": "...",\n'
+        '      "status": "...",\n'
+        '      "knowledge": ["新获得的信息"],\n'
+        '      "possessions": ["新获得的物品"],\n'
+        '      "knowledge_remove": ["遗忘/过时的信息"],\n'
+        '      "possessions_remove": ["丢失/消耗的物品"],\n'
+        '      "relationships": {{"id": "关系", "结束的id": null}}\n'
+        '    }}\n'
+        '  ]\n'
+        '}}\n'
+        "只输出 JSON。"
     )
 
     # ------------------------------------------------------------------
