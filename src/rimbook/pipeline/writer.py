@@ -23,6 +23,7 @@ from ..memory import ContextAssembler, Summarizer
 from ..outline import ChapterOutline, OutlineStore
 from ..project import ProjectPaths
 from ..memory.entity_state import EntityStateStore
+from ..versioning import ProjectLock, VersionManager, atomic_write
 from .post_write import PostWritePipeline, EnrichResult
 
 __all__ = ["Writer", "WriteResult"]
@@ -56,6 +57,7 @@ class Writer:
         entity_state: EntityStateStore,
         codex: CodexStore,
         generation: GenerationConfig,
+        version_manager: VersionManager | None = None,
     ) -> None:
         self.paths = paths
         self.llm = llm
@@ -66,6 +68,12 @@ class Writer:
         self.entity_state = entity_state
         self.codex = codex
         self.generation = generation
+        self.version_manager = version_manager
+
+    @property
+    def _lock(self) -> ProjectLock:
+        """Per-project file lock to prevent concurrent writes."""
+        return ProjectLock(self.paths.root)
 
     @property
     def _enricher(self) -> PostWritePipeline:
@@ -85,57 +93,64 @@ class Writer:
         if chapter is None:
             raise FileNotFoundError(f"Chapter {number} has no outline; run `plan chapter` first.")
 
-        # 1. Assemble context.
-        context = self.assembler.assemble_for_chapter(chapter)
+        with self._lock:
+            # Auto-checkpoint: snapshot the files that will be modified.
+            if persist and self.version_manager is not None and self.generation.auto_checkpoint:
+                affected = self._predict_affected_files(number, chapter)
+                branch = self.version_manager.get_current_branch()
+                self.version_manager.create_checkpoint(f"write-ch{number}-{branch}", affected)
+                self.version_manager.prune(self.generation.max_checkpoints)
 
-        # 2. Generate.
-        messages = self.llm.as_chat(
-            system=self.prompts.writer_system,
-            user=self.prompts.writer_user.format(
-                number=number,
-                context=context.text,
-            ),
-        )
-        gen = self.llm.generate(
-            messages,
-            temperature=self.generation.temperature,
-            max_tokens=self.generation.max_tokens,
-        )
-        draft = gen.content.strip()
+            # 1. Assemble context.
+            context = self.assembler.assemble_for_chapter(chapter)
 
-        # 3. Persist draft.
-        draft_path = self.paths.draft_file(number)
-        if persist:
-            draft_path.parent.mkdir(parents=True, exist_ok=True)
-            draft_path.write_text(draft + "\n", encoding="utf-8")
+            # 2. Generate.
+            messages = self.llm.as_chat(
+                system=self.prompts.writer_system,
+                user=self.prompts.writer_user.format(
+                    number=number,
+                    context=context.text,
+                ),
+            )
+            gen = self.llm.generate(
+                messages,
+                temperature=self.generation.temperature,
+                max_tokens=self.generation.max_tokens,
+            )
+            draft = gen.content.strip()
 
-        # 4. Run post-write pipeline: summarize + state + codex enrichment.
-        enrich_result = self._enricher.run(
-            number,
-            draft,
-            chapter,
-            enrich=self.generation.auto_enrich,
-        )
-        entity_ids = chapter.all_entities()
-        summary = ""
-        tracked = list(entity_ids)
-        try:
-            # Re-read summary from disk (summarizer wrote it inside .run()).
-            ch = self.outline.read_chapter(number)
-            if ch and ch.summary:
-                summary = ch.summary
-        except Exception:
-            pass
+            # 3. Persist draft (atomic).
+            draft_path = self.paths.draft_file(number)
+            if persist:
+                atomic_write(draft_path, draft + "\n")
 
-        return WriteResult(
-            chapter_number=number,
-            draft_path=str(draft_path),
-            summary=summary,
-            context_preview=context.text[:400] + ("…" if len(context.text) > 400 else ""),
-            entities_tracked=tracked,
-            usage=gen.usage,
-            enrichment=enrich_result if self.generation.auto_enrich else None,
-        )
+            # 4. Run post-write pipeline: summarize + state + codex enrichment.
+            enrich_result = self._enricher.run(
+                number,
+                draft,
+                chapter,
+                enrich=self.generation.auto_enrich,
+            )
+            entity_ids = chapter.all_entities()
+            summary = ""
+            tracked = list(entity_ids)
+            try:
+                # Re-read summary from disk (summarizer wrote it inside .run()).
+                ch = self.outline.read_chapter(number)
+                if ch and ch.summary:
+                    summary = ch.summary
+            except Exception:
+                pass
+
+            return WriteResult(
+                chapter_number=number,
+                draft_path=str(draft_path),
+                summary=summary,
+                context_preview=context.text[:400] + ("…" if len(context.text) > 400 else ""),
+                entities_tracked=tracked,
+                usage=gen.usage,
+                enrichment=enrich_result if self.generation.auto_enrich else None,
+            )
 
     def revise(
         self,
@@ -158,40 +173,66 @@ class Writer:
                 raise FileNotFoundError(f"No draft for chapter {number}")
             draft_text = path.read_text(encoding="utf-8").strip()
 
-        context = self.assembler.assemble_for_chapter(chapter)
-        user = self.prompts.writer_revise_user.format(
-            number=number,
-            context=context.text,
-            draft_text=draft_text,
-            instructions=instructions,
-        )
+        with self._lock:
+            # Auto-checkpoint before revision.
+            if persist and self.version_manager is not None and self.generation.auto_checkpoint:
+                affected = self._predict_affected_files(number, chapter)
+                branch = self.version_manager.get_current_branch()
+                self.version_manager.create_checkpoint(f"revise-ch{number}-{branch}", affected)
+                self.version_manager.prune(self.generation.max_checkpoints)
 
-        messages = self.llm.as_chat(system=self.prompts.writer_system, user=user)
-        gen = self.llm.generate(messages, temperature=0.7)
-        revised = gen.content.strip()
+            context = self.assembler.assemble_for_chapter(chapter)
+            user = self.prompts.writer_revise_user.format(
+                number=number,
+                context=context.text,
+                draft_text=draft_text,
+                instructions=instructions,
+            )
 
-        draft_path = self.paths.draft_file(number)
-        if persist:
-            draft_path.parent.mkdir(parents=True, exist_ok=True)
-            draft_path.write_text(revised + "\n", encoding="utf-8")
+            messages = self.llm.as_chat(system=self.prompts.writer_system, user=user)
+            gen = self.llm.generate(messages, temperature=0.7)
+            revised = gen.content.strip()
 
-        # Run post-write pipeline.
-        enrich_result = self._enricher.run(
-            number, revised, chapter, enrich=self.generation.auto_enrich
-        )
-        summary = ""
-        try:
-            ch = self.outline.read_chapter(number)
-            if ch and ch.summary:
-                summary = ch.summary
-        except Exception:
-            pass
+            draft_path = self.paths.draft_file(number)
+            if persist:
+                atomic_write(draft_path, revised + "\n")
 
-        return WriteResult(
-            chapter_number=number,
-            draft_path=str(draft_path),
-            summary=summary,
-            context_preview="",
-            entities_tracked=[],
-            usage=gen.usage,
-        )
+            # Run post-write pipeline.
+            enrich_result = self._enricher.run(
+                number, revised, chapter, enrich=self.generation.auto_enrich
+            )
+            summary = ""
+            try:
+                ch = self.outline.read_chapter(number)
+                if ch and ch.summary:
+                    summary = ch.summary
+            except Exception:
+                pass
+
+            return WriteResult(
+                chapter_number=number,
+                draft_path=str(draft_path),
+                summary=summary,
+                context_preview="",
+                entities_tracked=[],
+                usage=gen.usage,
+            )
+
+    def _predict_affected_files(self, number: int, chapter: ChapterOutline) -> list[Path]:
+        """Predict the files that a write/revise of *number* will modify.
+
+        Used by the auto-checkpoint to snapshot only the relevant files.
+        """
+        affected = [
+            self.paths.draft_file(number),
+            self.paths.chapter_outline(number),
+        ]
+        # Entity state files for all entities in the chapter.
+        state_dir = self.paths.state_dir / "entities"
+        for eid in chapter.all_entities():
+            affected.append(state_dir / f"{eid}.yaml")
+        # Codex files for all known entities.
+        for eid in chapter.all_entities():
+            for t in ("characters", "worldbuilding", "locations", "factions", "items", "timeline"):
+                affected.append(self.paths.codex_subdir(t) / f"{eid}.md")
+        return affected

@@ -176,7 +176,7 @@ def init(
         "language": language,
         "generation": {
             "temperature": 0.85,
-            "max_tokens": 4000,
+            "max_tokens": 50000,
             "recent_window_chapters": 1,
             "summary_history": 6,
             "auto_consistency_check": True,

@@ -134,9 +134,25 @@ class Planner:
             if vol:
                 volume_arc = vol.arc.strip()
 
+        # Include chapters up to and including *number* so that regenerating
+        # an already-written chapter's outline sees what already happened,
+        # not just the chapters before it.
         prev = self.outline.list_chapters()
-        prev = [c for c in prev if c.number < number]
-        prev_desc = _format_prev_chapters(prev[-3:])
+        prev_before = [c for c in prev if c.number < number]
+        prev_desc = _format_prev_chapters(prev_before[-3:])
+
+        # If this chapter already has an outline (e.g. regenerating),
+        # include its existing summary so the LLM plans based on what
+        # was already written, not as if the chapter is brand-new.
+        current_chapter = next((c for c in prev if c.number == number), None)
+        existing_summary_block = ""
+        existing_beats_block = ""
+        if current_chapter:
+            if current_chapter.summary.strip():
+                existing_summary_block = f"本章已有摘要（重新规划时请保持一致）：\n{current_chapter.summary.strip()}\n\n"
+            if current_chapter.beats:
+                beat_goals = "; ".join(b.goal for b in current_chapter.beats)
+                existing_beats_block = f"本章已有 beat（参考已有内容重新规划）：\n{beat_goals}\n\n"
 
         entity_registry = self._format_entity_registry()
 
@@ -154,11 +170,19 @@ class Planner:
                 title_block=(f"标题：{title}" if title else ""),
             ),
         )
+        # If regenerating an existing chapter, inject existing-context after
+        # the standard prompt so the LLM is aware.
+        if existing_summary_block or existing_beats_block:
+            messages[-1]["content"] += "\n\n" + existing_summary_block + existing_beats_block + "请基于上述已有内容为第 {number} 章重新规划 beat。".replace("{number}", str(number))
         # Ask for JSON so we can parse beats + entities reliably.
         result = self.llm.generate_json(messages, temperature=0.7)
         chapter, warnings = _parse_chapter_json(
             number, result, volume=volume, title=title, codex=self.codex
         )
+
+        # Preserve the existing summary so regeneration doesn't wipe it.
+        if current_chapter and current_chapter.summary.strip():
+            chapter.summary = current_chapter.summary
 
         # Collect diagnostics about new vs reused ids.
         resolved_ids: list[str] = []

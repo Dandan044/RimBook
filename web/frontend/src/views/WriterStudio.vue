@@ -358,12 +358,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useProjectStore } from '../stores/project'
 import {
   listChapters, getDraft, updateDraft, previewContext,
   checkChapter, reviseChapter, regenerateSummary,
-  writeChapterSSE, type ChapterOutline, type CheckIssue,
+  writeChapterSSE, getWriteStatus,
+  type ChapterOutline, type CheckIssue,
 } from '../api'
 import { ElMessage } from 'element-plus'
 import { marked } from 'marked'
@@ -472,6 +473,12 @@ function toggleSection(i: number) { collapsedSections.value.has(i) ? collapsedSe
 async function fetchChapterList() {
   if (!store.currentId) return
   chapterList.value = await listChapters(store.currentId)
+  // Auto-select the latest chapter on load
+  if (chapterList.value.length > 0 && !chapterNum.value) {
+    const latest = chapterList.value.reduce((a, b) => a.number > b.number ? a : b)
+    chapterNum.value = latest.number
+    loadChapter()
+  }
 }
 
 async function loadChapter() {
@@ -501,9 +508,18 @@ async function doWrite() {
   progressMsg.value = '连接中…'
   checkReport.value = null
 
+  // Register in store so navigation away doesn't lose track.
+  store.startWriteTracking(chapterNum.value)
+
   // Use SSE for streaming progress
   const es = writeChapterSSE(store.currentId, chapterNum.value, {
-    onProgress: (msg) => { progressMsg.value = msg },
+    onProgress: (msg) => {
+      progressMsg.value = msg
+      store.writeTasks[chapterNum.value!] = {
+        ...store.writeTasks[chapterNum.value!],
+        progress: msg,
+      }
+    },
     onContext: (data) => { contextText.value = (data as any).preview || '' },
     onDraft: async (data) => {
       const d = data as any
@@ -516,10 +532,14 @@ async function doWrite() {
     onEnrichment: (data) => {
       enrichmentResult.value = data as any
     },
-    onError: (msg) => { ElMessage.error(msg) },
+    onError: (msg) => {
+      ElMessage.error(msg)
+      store.stopWriteTracking(chapterNum.value!)
+    },
     onDone: async () => {
       writing.value = false
       progressMsg.value = ''
+      store.stopWriteTracking(chapterNum.value!)
       await loadChapter()
       ElMessage.success('生成完成')
     },
@@ -565,6 +585,47 @@ async function saveDraft() {
 }
 
 onMounted(fetchChapterList)
+
+// Check for active writes when entering this page (may have navigated away and back).
+async function checkActiveWrite() {
+  if (!store.currentId || !chapterNum.value) return
+  const num = chapterNum.value
+  try {
+    const s = await getWriteStatus(store.currentId, num)
+    if (s.active) {
+      writing.value = true
+      progressMsg.value = s.progress
+      store.startWriteTracking(num)
+      // Poll until done.
+      const poll = setInterval(async () => {
+        try {
+          const st = await getWriteStatus(store.currentId!, num)
+          if (st.active) {
+            progressMsg.value = st.progress
+          } else {
+            clearInterval(poll)
+            writing.value = false
+            progressMsg.value = ''
+            store.stopWriteTracking(num)
+            await loadChapter()
+            if (st.draft_exists) {
+              ElMessage.success('生成完成（已在后台完成）')
+            }
+          }
+        } catch { /* keep polling */ }
+      }, 3000)
+    }
+  } catch { /* ignore */ }
+}
+
+// Run check when chapter changes.
+watch(chapterNum, () => {
+  if (chapterNum.value) checkActiveWrite()
+})
+// Also check on first mount.
+onMounted(() => {
+  if (chapterNum.value) checkActiveWrite()
+})
 </script>
 
 <style scoped>

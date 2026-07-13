@@ -48,6 +48,7 @@ DEFAULT_GLOBAL_CONFIG: dict[str, Any] = {
         "api_key": "${LLM_API_KEY}",
         "model": "gpt-4o",
         "check_model": None,
+        "reasoning_effort": None,
         "embedding": {
             "base_url": None,
             "api_key": None,
@@ -91,6 +92,7 @@ class LLMConfig(BaseModel):
     api_key: str | None = None
     model: str = "gpt-4o"
     check_model: str | None = None
+    reasoning_effort: str | None = None  # "low" | "medium" | "high" | None
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
 
     @property
@@ -102,7 +104,7 @@ class GenerationConfig(BaseModel):
     """Knobs that control context assembly and the write-check loop."""
 
     temperature: float = 0.85
-    max_tokens: int = 4000
+    max_tokens: int = 40000
     recent_window_chapters: int = 1
     summary_history: int = 6
     auto_consistency_check: bool = True
@@ -112,6 +114,8 @@ class GenerationConfig(BaseModel):
     codex_max_tokens: int = 2000
     codex_entry_max_chars: int = 1500
     auto_enrich: bool = True  # LLM-driven codex enrichment after each chapter
+    auto_checkpoint: bool = True  # auto-checkpoint before each write/revise
+    max_checkpoints: int = 50  # prune oldest checkpoints beyond this count
 
 
 class Config(BaseModel):
@@ -204,7 +208,7 @@ def load_config(project_dir: Path, *, global_cfg: dict[str, Any] | None = None) 
     gen_raw = project_raw.get("generation", {}) or {}
     generation = GenerationConfig(
         temperature=gen_raw.get("temperature", 0.85),
-        max_tokens=gen_raw.get("max_tokens", 4000),
+        max_tokens=gen_raw.get("max_tokens", 40000),
         recent_window_chapters=gen_raw.get("recent_window_chapters", 1),
         summary_history=gen_raw.get("summary_history", 6),
         auto_consistency_check=gen_raw.get("auto_consistency_check", True),
@@ -214,6 +218,8 @@ def load_config(project_dir: Path, *, global_cfg: dict[str, Any] | None = None) 
         codex_max_tokens=gen_raw.get("codex_max_tokens", 2000),
         codex_entry_max_chars=gen_raw.get("codex_entry_max_chars", 1500),
         auto_enrich=gen_raw.get("auto_enrich", True),
+        auto_checkpoint=gen_raw.get("auto_checkpoint", True),
+        max_checkpoints=gen_raw.get("max_checkpoints", 50),
     )
 
     return Config(
@@ -263,6 +269,7 @@ def _build_llm_config(raw: dict[str, Any]) -> LLMConfig:
         api_key=api_key,
         model=model,
         check_model=check_model,
+        reasoning_effort=raw.get("reasoning_effort") or None,
         embedding=embedding,
     )
 

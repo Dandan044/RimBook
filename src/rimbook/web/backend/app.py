@@ -15,7 +15,7 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 
-from .routes import codex, outline, projects, prompts, server, status, writer
+from .routes import codex, outline, projects, prompts, server, status, versioning, writer
 
 app = FastAPI(
     title="RimBook",
@@ -46,6 +46,7 @@ app.include_router(writer.router)
 app.include_router(prompts.router)
 app.include_router(prompts.preview_router)
 app.include_router(server.router)
+app.include_router(versioning.router)
 
 # ---------------------------------------------------------------------------
 # Global workspace config routes (not tied to any project)
@@ -90,6 +91,7 @@ def get_global_config() -> dict:
             "api_key": masked_key,
             "model": llm.get("model", "gpt-4o") if isinstance(llm, dict) else "gpt-4o",
             "check_model": llm.get("check_model") if isinstance(llm, dict) else None,
+            "reasoning_effort": llm.get("reasoning_effort") if isinstance(llm, dict) else None,
             "embedding": {
                 "base_url": emb.get("base_url") if isinstance(emb, dict) else None,
                 "api_key": masked_emb_key,
@@ -104,6 +106,7 @@ class GlobalConfigUpdate(BaseModel):
     api_key: str | None = None
     model: str | None = None
     check_model: str | None = None
+    reasoning_effort: str | None = None
     embed_base_url: str | None = None
     embed_api_key: str | None = None
     embed_model: str | None = None
@@ -124,6 +127,10 @@ def update_global_config(req: GlobalConfigUpdate) -> dict:
             if key == "api_key" and _is_masked(val):
                 continue
             llm[key] = val
+
+    # reasoning_effort: allow setting to None explicitly (empty string → None)
+    if req.reasoning_effort is not None:
+        llm["reasoning_effort"] = req.reasoning_effort or None
 
     if req.embed_base_url is not None:
         url = req.embed_base_url.rstrip("/")

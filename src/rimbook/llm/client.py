@@ -77,13 +77,17 @@ class LLMClient:
             model=used_model,
             messages=messages,  # type: ignore[arg-type]
         )
-        # temperature / max_tokens live on GenerationConfig, not LLMConfig.
-        # Only include them when the caller provides explicit values.
-        if temperature is not None:
+        # When reasoning_effort is set, the model operates in reasoning mode.
+        # Most reasoning models (DeepSeek-R, OpenAI o1/o3, etc.) do not accept
+        # temperature / top_p — skip them to avoid API errors.
+        reasoning = self._config.reasoning_effort
+        if reasoning:
+            kwargs["reasoning_effort"] = reasoning
+        if temperature is not None and not reasoning:
             kwargs["temperature"] = temperature
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
-        if top_p is not None:
+        if top_p is not None and not reasoning:
             kwargs["top_p"] = top_p
         if stop is not None:
             kwargs["stop"] = stop

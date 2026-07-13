@@ -20,6 +20,7 @@ import frontmatter
 import yaml
 
 from ..project import ProjectPaths
+from ..versioning import atomic_write
 from .models import ChapterOutline, SceneBeat, VolumeOutline
 
 __all__ = ["OutlineStore"]
@@ -42,8 +43,7 @@ class OutlineStore:
 
     def write_synopsis(self, text: str) -> Path:
         path = self.paths.synopsis_file
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text.strip() + "\n", encoding="utf-8")
+        atomic_write(path, text.strip() + "\n")
         return path
 
     # ==================================================================
@@ -51,7 +51,6 @@ class OutlineStore:
     # ==================================================================
     def write_volume(self, vol: VolumeOutline) -> Path:
         path = self.paths.volume_outline(vol.number)
-        path.parent.mkdir(parents=True, exist_ok=True)
         post = frontmatter.Post(vol.arc or "")
         post.metadata = {
             "number": vol.number,
@@ -59,7 +58,7 @@ class OutlineStore:
             "chapters": vol.chapters,
             "ending": vol.ending,
         }
-        path.write_text(frontmatter.dumps(post, sort_keys=False), encoding="utf-8")
+        atomic_write(path, frontmatter.dumps(post, sort_keys=False))
         return path
 
     def read_volume(self, number: int) -> VolumeOutline | None:
@@ -84,7 +83,6 @@ class OutlineStore:
     # ==================================================================
     def write_chapter(self, ch: ChapterOutline) -> Path:
         path = self.paths.chapter_outline(ch.number)
-        path.parent.mkdir(parents=True, exist_ok=True)
 
         post = frontmatter.Post(ch.notes or "")
         post.metadata = {
@@ -96,7 +94,7 @@ class OutlineStore:
             "beats": [b.model_dump() for b in ch.beats],
             "summary": ch.summary,
         }
-        path.write_text(frontmatter.dumps(post, sort_keys=False), encoding="utf-8")
+        atomic_write(path, frontmatter.dumps(post, sort_keys=False))
         return path
 
     def read_chapter(self, number: int) -> ChapterOutline | None:

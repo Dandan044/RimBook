@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from rimbook.outline import ChapterOutline, SceneBeat, VolumeOutline
 
 from ..deps import ProjectDeps, get_project_deps
+from ..tasks import task_registry
 
 router = APIRouter(prefix="/api/projects/{project_id}/outline", tags=["outline"])
 
@@ -111,8 +112,12 @@ def plan_volume(req: PlanVolumeRequest, deps: ProjectDeps = Depends(get_project_
     """LLM-plan a volume. The volume number is auto-inferred."""
     existing = deps.outline.list_volumes()
     number = max((v.number for v in existing), default=0) + 1
-    vol = deps.planner.plan_volume(number, title=req.title)
-    return _vol_out(vol)
+    task_registry.register(deps.project_dir.name, "plan_volume", None, "正在规划卷…")
+    try:
+        vol = deps.planner.plan_volume(number, title=req.title)
+        return _vol_out(vol)
+    finally:
+        task_registry.unregister(deps.project_dir.name, "plan_volume", None)
 
 
 @router.get("/volumes/{number}", response_model=VolumeOutlineOut | None)
@@ -140,8 +145,23 @@ def list_chapters(deps: ProjectDeps = Depends(get_project_deps)) -> list[Chapter
 def plan_chapter(req: PlanChapterRequest, deps: ProjectDeps = Depends(get_project_deps)) -> ChapterOutlineOut:
     """LLM-plan a chapter beat. The chapter number is auto-inferred."""
     number = deps.outline.last_chapter_number() + 1
-    ch = deps.planner.plan_chapter(number, volume=req.volume, title=req.title, hint=req.hint)
-    return _ch_out(ch)
+    task_registry.register(deps.project_dir.name, "plan_chapter", number, "正在规划章节…")
+    try:
+        ch = deps.planner.plan_chapter(number, volume=req.volume, title=req.title, hint=req.hint)
+        return _ch_out(ch)
+    finally:
+        task_registry.unregister(deps.project_dir.name, "plan_chapter", number)
+
+
+@router.post("/chapters/{number}/regenerate", response_model=ChapterOutlineOut)
+def regenerate_chapter(number: int, req: PlanChapterRequest, deps: ProjectDeps = Depends(get_project_deps)) -> ChapterOutlineOut:
+    """LLM 重新生成已有章节的大纲（基于已有内容感知，不覆盖摘要）。"""
+    task_registry.register(deps.project_dir.name, "plan_chapter", number, "正在重新规划…")
+    try:
+        ch = deps.planner.plan_chapter(number, volume=req.volume, title=req.title, hint=req.hint)
+        return _ch_out(ch)
+    finally:
+        task_registry.unregister(deps.project_dir.name, "plan_chapter", number)
 
 
 @router.get("/chapters/{number}", response_model=ChapterOutlineOut | None)
@@ -157,9 +177,10 @@ def update_chapter(number: int, req: ChapterOutlineIn, deps: ProjectDeps = Depen
         number=number, title=req.title, volume=req.volume,
         entities=req.entities, tags=req.tags, beats=beats, notes=req.notes,
     )
-    # Preserve existing summary if not overwritten.
+    # Always preserve existing summary — it only changes via the summarizer
+    # after a chapter write, never from manual outline editing.
     existing = deps.outline.read_chapter(number)
-    if existing and existing.summary and not req.notes:
+    if existing and existing.summary:
         ch.summary = existing.summary
     deps.outline.write_chapter(ch)
     return _ch_out(ch)

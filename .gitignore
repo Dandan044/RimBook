@@ -50,3 +50,4 @@ _codex_tmpl_b64.txt
 
 # ZCode plans
 .zcode/
+server.log

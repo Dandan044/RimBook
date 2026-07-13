@@ -9,12 +9,13 @@ files, return dicts/lists. No database.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import frontmatter
 from pydantic import ValidationError
 
 from ..project import ProjectPaths
+from ..versioning import atomic_write
 from .models import CodexEntry, Revelation, Contradiction, Relationship, ENTITY_TYPE_PLURALS, VALID_TYPES
 
 __all__ = ["CodexStore"]
@@ -60,12 +61,10 @@ class CodexStore:
     def write(self, entry: CodexEntry) -> Path:
         """Persist an entry to disk, creating its directory if needed."""
         path = self.file_for(entry.type, entry.id)
-        path.parent.mkdir(parents=True, exist_ok=True)
 
         post = frontmatter.Post(entry.body)
         post.metadata = _serialize_structured(entry)
-        with path.open("w", encoding="utf-8") as fh:
-            fh.write(frontmatter.dumps(post, sort_keys=False))
+        atomic_write(path, frontmatter.dumps(post, sort_keys=False))
         return path
 
     def read(self, entry_id: str) -> CodexEntry:

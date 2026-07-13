@@ -14,6 +14,7 @@ from rimbook.outline import ChapterOutline
 
 from ..deps import ProjectDeps, get_project_deps
 from ..sse import sse_done, sse_event, sse_progress
+from ..tasks import task_registry
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["writer"])
 
@@ -77,6 +78,7 @@ def write_chapter_sse(number: int, deps: ProjectDeps = Depends(get_project_deps)
     """Generate a chapter with SSE progress streaming."""
 
     async def event_stream():
+        task_registry.register(project_id, "write", number, "准备中…")
         try:
             yield sse_progress("正在加载章节大纲…")
             ch = deps.outline.read_chapter(number)
@@ -146,28 +148,62 @@ def write_chapter_sse(number: int, deps: ProjectDeps = Depends(get_project_deps)
         except Exception as exc:
             yield sse_event("error", {"message": str(exc)})
             yield sse_done()
+        finally:
+            task_registry.unregister(project_id, "write", number)
 
     return EventSourceResponse(event_stream())
+
+
+# ---- write status (polling fallback for reconnection) ----
+
+@router.get("/write-status/{number}")
+def write_status(project_id: str, number: int, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
+    """Check if a write/revise is in progress for this chapter."""
+    t = task_registry.get(project_id, "write", number) or task_registry.get(project_id, "revise", number)
+    if t:
+        return {"active": True, "progress": t.progress, "started_at": t.started_at, "op": t.op}
+    draft_path = deps.paths.draft_file(number)
+    if draft_path.exists():
+        return {"active": False, "progress": "completed", "draft_exists": True, "op": ""}
+    return {"active": False, "progress": "", "draft_exists": False, "op": ""}
+
+
+# ---- all active tasks ----
+
+@router.get("/tasks")
+def list_tasks(project_id: str) -> dict:
+    """List all active long-running tasks for this project."""
+    tasks = task_registry.list_for_project(project_id)
+    return {
+        "tasks": [
+            {"op": t.op, "chapter": t.chapter, "started_at": t.started_at, "progress": t.progress}
+            for t in tasks
+        ]
+    }
 
 
 # ---- check ----
 
 @router.post("/check/{number}")
-def check_chapter(number: int, req: CheckRequest, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
+def check_chapter(project_id: str, number: int, req: CheckRequest, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
     """Run consistency check on a chapter draft."""
     path = deps.paths.draft_file(number)
     if not path.exists():
         raise HTTPException(404, f"No draft for chapter {number}")
 
     if req.fix:
-        max_rounds = deps.config.generation.max_fix_rounds
+        task_registry.register(project_id, "check", number, "校验并修复中…")
+        try:
+            max_rounds = deps.config.generation.max_fix_rounds
 
-        def apply_fix(text: str, issues_blob: str) -> str:
-            res = deps.writer.revise(number, draft_text=text, instructions=f"请解决以下审校问题：\n{issues_blob}")
-            from pathlib import Path
-            return Path(res.draft_path).read_text(encoding="utf-8").strip()
+            def apply_fix(text: str, issues_blob: str) -> str:
+                res = deps.writer.revise(number, draft_text=text, instructions=f"请解决以下审校问题：\n{issues_blob}")
+                from pathlib import Path
+                return Path(res.draft_path).read_text(encoding="utf-8").strip()
 
-        report = deps.checker.check_and_fix(number, max_rounds=max_rounds, apply_fix=apply_fix)
+            report = deps.checker.check_and_fix(number, max_rounds=max_rounds, apply_fix=apply_fix)
+        finally:
+            task_registry.unregister(project_id, "check", number)
     else:
         report = deps.checker.check(number)
 
@@ -192,17 +228,20 @@ def check_chapter(number: int, req: CheckRequest, deps: ProjectDeps = Depends(ge
 # ---- revise ----
 
 @router.post("/revise/{number}")
-def revise_chapter(number: int, req: ReviseRequest, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
+def revise_chapter(project_id: str, number: int, req: ReviseRequest, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
     """Revise a chapter draft."""
+    task_registry.register(project_id, "revise", number, "修订中…")
     try:
         result = deps.writer.revise(number, instructions=req.instructions)
+        return {
+            "draft_path": result.draft_path,
+            "summary": result.summary,
+            "usage": result.usage,
+        }
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc))
-    return {
-        "draft_path": result.draft_path,
-        "summary": result.summary,
-        "usage": result.usage,
-    }
+    finally:
+        task_registry.unregister(project_id, "revise", number)
 
 
 # ---- summary ----

@@ -166,7 +166,7 @@ import { useProjectStore } from '../stores/project'
 import {
   getSynopsis, updateSynopsis, generateSynopsis as apiGenerateSynopsis,
   listVolumes, planVolume, updateVolume,
-  listChapters, planChapter, updateChapter,
+  listChapters, planChapter, updateChapter, regenerateChapter,
   type VolumeOutline, type ChapterOutline, type SceneBeat,
 } from '../api'
 import { ElMessage } from 'element-plus'
@@ -297,20 +297,26 @@ async function addChapter() {
 }
 
 async function generateBeat() {
-  // Re-plan current chapter beat via LLM
+  // Re-plan current chapter beat via LLM (preserves chapter number + summary)
   if (!store.currentId || !editingChapter.value) return
   generating.value = true
   try {
-    const c = await planChapter(store.currentId, { volume: editingChapter.value.volume || undefined, title: editingChapter.value.title })
-    // Replace the chapter in our list
-    const idx = chapters.value.findIndex(ch => ch.number === c.number)
+    const chNum = editingChapter.value.number
+    const c = await regenerateChapter(store.currentId, chNum, {
+      volume: editingChapter.value.volume || undefined,
+      title: editingChapter.value.title,
+    })
+    // Replace the chapter in our list (same number, so findIndex should match)
+    const idx = chapters.value.findIndex(ch => ch.number === chNum)
     if (idx >= 0) chapters.value[idx] = c
+    else chapters.value.push(c)
     Object.assign(chapterForm, {
       title: c.title, volume: c.volume, entities: [...c.entities], tags: [...c.tags],
       beats: c.beats.map(b => ({ ...b, entities: [...b.entities] })), notes: c.notes,
     })
+    editingChapter.value = c
     ElMessage.success('Beat 已重新生成')
-  } catch (e: any) { ElMessage.error('生成失败') }
+  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '生成失败') }
   finally { generating.value = false }
 }
 

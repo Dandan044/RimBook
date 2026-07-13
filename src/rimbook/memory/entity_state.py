@@ -18,6 +18,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from ..project import ProjectPaths
+from ..versioning import atomic_write
 
 __all__ = ["EntityState", "EntityStateStore", "KnowledgeItem", "PossessionItem"]
 
@@ -109,10 +110,7 @@ class EntityStateStore:
     def save(self, state: EntityState) -> Path:
         path = self._path(state.entity_id)
         data = state.model_dump(mode="json")
-        path.write_text(
-            yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
+        atomic_write(path, yaml.safe_dump(data, allow_unicode=True, sort_keys=False))
         return path
 
     def all(self) -> list[EntityState]:

@@ -77,6 +77,7 @@ class PostWritePipeline:
         entity_state: EntityStateStore,
         summarizer: Summarizer,
         generation: GenerationConfig,
+        version_manager=None,
     ) -> None:
         self.llm = llm
         self.prompts = prompts
@@ -84,6 +85,7 @@ class PostWritePipeline:
         self.entity_state = entity_state
         self.summarizer = summarizer
         self.generation = generation
+        self.version_manager = version_manager
 
     # ------------------------------------------------------------------
     # Full pipeline
@@ -104,8 +106,10 @@ class PostWritePipeline:
           3. LLM-driven codex enrichment (if *enrich* is True).
           4. Sync codex ``related`` fields.
 
-        Returns an :class:`EnrichResult` even when individual steps fail, so
-        the caller always gets a diagnostic report.
+        If a severe error occurs that corrupts the pipeline state and a
+        version_manager is available, the caller's pre-write checkpoint
+        serves as the rollback point. Individual step failures are logged
+        and skipped (best-effort), preserving partial progress.
         """
         result = EnrichResult(chapter_number=number)
 

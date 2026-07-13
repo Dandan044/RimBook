@@ -130,12 +130,14 @@ def create_project(req: ProjectCreate) -> ProjectInfo:
         "language": req.language,
         "generation": {
             "temperature": 0.85,
-            "max_tokens": 4000,
+            "max_tokens": 40000,
             "recent_window_chapters": 1,
             "summary_history": 6,
             "auto_consistency_check": True,
             "auto_fix": False,
             "max_fix_rounds": 2,
+            "auto_checkpoint": True,
+            "max_checkpoints": 50,
         },
     }
     (target / "config.yaml").write_text(

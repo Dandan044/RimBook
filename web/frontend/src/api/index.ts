@@ -86,7 +86,7 @@ export interface CheckIssue {
 // ---------- Global Config (workspace-level, shared by all projects) ----------
 
 export const getGlobalConfig = () =>
-  http.get<{ llm: { base_url: string; api_key: string; model: string; check_model: string | null; embedding: { base_url: string | null; api_key: string; model: string } } }>('/config').then(r => r.data)
+  http.get<{ llm: { base_url: string; api_key: string; model: string; check_model: string | null; reasoning_effort: string | null; embedding: { base_url: string | null; api_key: string; model: string } } }>('/config').then(r => r.data)
 
 export const updateGlobalConfig = (data: Record<string, unknown>) =>
   http.put<{ ok: boolean }>('/config', data).then(r => r.data)
@@ -162,6 +162,9 @@ export const getChapter = (projectId: string, number: number) =>
 export const updateChapter = (projectId: string, number: number, data: Partial<ChapterOutline>) =>
   http.put<ChapterOutline>(`/projects/${projectId}/outline/chapters/${number}`, data).then(r => r.data)
 
+export const regenerateChapter = (projectId: string, number: number, data: { volume?: number; title?: string; hint?: string }) =>
+  http.post<ChapterOutline>(`/projects/${projectId}/outline/chapters/${number}/regenerate`, data).then(r => r.data)
+
 // ---------- Writer ----------
 
 export const getDraft = (projectId: string, number: number) =>
@@ -235,6 +238,61 @@ export function writeChapterSSE(
   return es
 }
 
+// ---------- Checkpoints / Branches (version management) ----------
+
+export interface CheckpointInfo {
+  name: string
+  label: string
+  timestamp: string
+  branch: string
+  parent: string | null
+  file_count: number
+}
+
+export interface BranchInfo {
+  name: string
+  head: string
+  is_current: boolean
+  checkpoint_count: number
+}
+
+export const listCheckpoints = (projectId: string, branch?: string) =>
+  http.get<{ checkpoints: CheckpointInfo[]; current_branch: string; fork_points: Record<string, string[]> }>(
+    `/projects/${projectId}/checkpoints`, { params: branch ? { branch } : {} }
+  ).then(r => r.data)
+
+export const createCheckpoint = (projectId: string, data: { label?: string; files?: string[] } = {}) =>
+  http.post<{ checkpoint: string; files: number; branch: string }>(`/projects/${projectId}/checkpoints`, data).then(r => r.data)
+
+export const restoreCheckpoint = (projectId: string, name: string, files: string[] | null = null) =>
+  http.post<{ restored: number; skipped: number }>(`/projects/${projectId}/checkpoints/${name}/restore`, { files }).then(r => r.data)
+
+export const diffCheckpoint = (projectId: string, name: string) =>
+  http.get<{ changed: { file: string; status: string }[]; added: string[] }>(`/projects/${projectId}/checkpoints/${name}/diff`).then(r => r.data)
+
+export const deleteCheckpoint = (projectId: string, name: string) =>
+  http.delete<{ ok: boolean }>(`/projects/${projectId}/checkpoints/${name}`).then(r => r.data)
+
+// Branches
+export const listBranches = (projectId: string) =>
+  http.get<{ branches: BranchInfo[]; current: string; fork_points: Record<string, string[]> }>(
+    `/projects/${projectId}/branches`
+  ).then(r => r.data)
+
+export const createBranch = (projectId: string, data: { name: string; from_checkpoint?: string | null }) =>
+  http.post<{ ok: boolean; branch: string }>(`/projects/${projectId}/branches`, data).then(r => r.data)
+
+export const switchBranch = (projectId: string, name: string) =>
+  http.post<{ ok: boolean; branch: string; saved_checkpoint: string | null }>(`/projects/${projectId}/branches/${name}/switch`).then(r => r.data)
+
+export const deleteBranch = (projectId: string, name: string) =>
+  http.delete<{ ok: boolean }>(`/projects/${projectId}/branches/${name}`).then(r => r.data)
+
+export const getBranchHistory = (projectId: string, name: string) =>
+  http.get<{ branch: string; history: CheckpointInfo[]; fork_points: Record<string, string[]> }>(
+    `/projects/${projectId}/branches/${name}/history`
+  ).then(r => r.data)
+
 // ---------- Server management ----------
 
 export interface ServerStatus {
@@ -280,6 +338,18 @@ export const testLLM = (projectId: string) =>
 
 export const testEmbedding = (projectId: string) =>
   http.post<{ ok: boolean; model?: string; dimensions?: number; error?: string }>(`/projects/${projectId}/test-embedding`).then(r => r.data)
+
+// ---------- Write status (poll when SSE disconnects) ----------
+
+export const getWriteStatus = (projectId: string, number: number) =>
+  http.get<{ active: boolean; progress: string; started_at: string; draft_exists?: boolean; op?: string }>(
+    `/projects/${projectId}/write-status/${number}`
+  ).then(r => r.data)
+
+export const getTasks = (projectId: string) =>
+  http.get<{ tasks: { op: string; chapter: number | null; started_at: string; progress: string }[] }>(
+    `/projects/${projectId}/tasks`
+  ).then(r => r.data)
 
 // ---------- Prompts / Workflow ----------
 

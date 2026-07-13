@@ -52,6 +52,8 @@ class ConfigUpdate(BaseModel):
     auto_consistency_check: bool | None = None
     auto_fix: bool | None = None
     max_fix_rounds: int | None = None
+    auto_checkpoint: bool | None = None
+    max_checkpoints: int | None = None
 
 
 # ---- routes ----
@@ -104,7 +106,7 @@ def create_project(req: ProjectCreate) -> ProjectInfo:
         },
         "generation": {
             "temperature": 0.85,
-            "max_tokens": 4000,
+            "max_tokens": 40000,
             "recent_window_chapters": 1,
             "summary_history": 6,
             "auto_consistency_check": True,
@@ -158,7 +160,7 @@ def update_config(req: ConfigUpdate, deps: ProjectDeps = Depends(get_project_dep
             llm[key] = val
     # Generation
     gen = raw.setdefault("generation", {})
-    for key in ("temperature", "max_tokens", "auto_consistency_check", "auto_fix", "max_fix_rounds"):
+    for key in ("temperature", "max_tokens", "auto_consistency_check", "auto_fix", "max_fix_rounds", "auto_checkpoint", "max_checkpoints"):
         val = getattr(req, key, None)
         if val is not None:
             gen[key] = val

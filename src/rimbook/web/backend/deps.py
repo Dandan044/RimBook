@@ -27,6 +27,7 @@ from rimbook.memory import (
 from rimbook.outline import OutlineStore
 from rimbook.pipeline import Checker, Planner, Writer, PostWritePipeline
 from rimbook.project import ProjectPaths, scaffold_project
+from rimbook.versioning import VersionManager
 
 
 def workspace_root() -> Path:
@@ -94,6 +95,10 @@ class ProjectDeps:
         return Summarizer(self.llm, self.prompts, self.outline)
 
     @property
+    def version_manager(self) -> VersionManager:
+        return VersionManager(self.paths.versions_dir, self.project_dir)
+
+    @property
     def writer(self) -> Writer:
         return Writer(
             self.paths,
@@ -105,6 +110,7 @@ class ProjectDeps:
             entity_state=self.entity_state,
             codex=self.codex,
             generation=self.config.generation,
+            version_manager=self.version_manager,
         )
 
     @property
@@ -124,6 +130,7 @@ class ProjectDeps:
             entity_state=self.entity_state,
             summarizer=self.summarizer,
             generation=self.config.generation,
+            version_manager=self.version_manager,
         )
 
 
