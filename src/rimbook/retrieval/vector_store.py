@@ -79,6 +79,18 @@ class VectorIndexer(_ChromaBase):
             metadatas=[{"id": entry.id, "name": entry.name, "type": entry.type}],
         )
 
+    def update_summary(self, number: int, title: str, summary: str) -> None:
+        """Upsert a single chapter summary into the index."""
+        col = self._collection("summaries")
+        text = f"第{number}章：{summary}"
+        vec = self.llm.embed(text)[0]
+        col.upsert(
+            ids=[f"ch{number:03d}"],
+            embeddings=[vec],
+            documents=[text],
+            metadatas=[{"chapter": number, "title": title}],
+        )
+
     # ------------------------------------------------------------------
     def _index_codex(self, codex: CodexStore) -> int:
         # Recreate fresh.

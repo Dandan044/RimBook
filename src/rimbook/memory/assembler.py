@@ -4,16 +4,24 @@ On every generation, instead of dumping an entire novel into the prompt, we
 assemble a small, carefully layered context that contains *exactly* what the
 model needs to write the current chapter consistently:
 
+0. The project style bible (narrative voice/POV/tone rules),
 1. Relevant codex entries (explicit via the chapter's entity ids/tags,
    supplemented by optional vector retrieval),
-2. The synopsis + relevant volume summaries (the big picture),
+2. The synopsis (original plan) + hierarchical memory: the rolling
+   story-so-far recap, completed-volume recaps, and the current volume arc,
 3. Recent chapter *summaries* (what happened before),
 4. A sliding window of recent *full prose* (voice/tense continuity),
 5. The *current* state of every entity involved (anti-OOC),
-6. The chapter beat itself (what must happen now).
+6. Open plot threads (foreshadowing / suspense that must not be forgotten),
+7. The chapter beat itself (what must happen now).
 
 The result is a single :class:`AssembledContext` string + token estimate,
 ready to feed to the writer.
+
+``assemble_for_chapter(..., mode="check")`` produces a leaner variant for the
+consistency checker: it drops the style bible and the full recent prose
+(the checker receives the chapter text separately), keeping only the
+reference material needed to audit consistency.
 """
 
 from __future__ import annotations
@@ -25,6 +33,7 @@ from ..config import GenerationConfig
 from ..outline import ChapterOutline, OutlineStore
 from ..project import ProjectPaths
 from .entity_state import EntityState, EntityStateStore
+from .threads import ThreadStore
 from .window import SlidingWindow
 
 __all__ = ["ContextAssembler", "AssembledContext", "SectionInfo"]
@@ -72,6 +81,7 @@ class ContextAssembler:
         window: SlidingWindow,
         generation: GenerationConfig,
         retriever=None,  # optional VectorRetriever (Phase 2); avoids hard dep
+        threads: ThreadStore | None = None,
     ) -> None:
         self.paths = paths
         self.codex = codex
@@ -80,12 +90,37 @@ class ContextAssembler:
         self.window = window
         self.generation = generation
         self.retriever = retriever
+        self.threads = threads if threads is not None else ThreadStore(paths)
 
-    def assemble_for_chapter(self, chapter: ChapterOutline) -> AssembledContext:
-        """Assemble context for writing the given chapter outline."""
+    def assemble_for_chapter(
+        self, chapter: ChapterOutline, *, mode: str = "write"
+    ) -> AssembledContext:
+        """Assemble context for the given chapter outline.
+
+        *mode* is ``"write"`` (full context for prose generation) or
+        ``"check"`` (leaner reference material for the consistency checker:
+        no style bible, no recent full prose).
+        """
         sections: list[str] = []
         emit = sections.append  # local alias
         section_list: list[SectionInfo] = []
+        for_writing = mode != "check"
+
+        # --- 0. Style bible (voice card) --------------------------------
+        if for_writing:
+            style = self.outline.read_style().strip()
+            if style:
+                style_text = (
+                    "## 写作风格指南（人称/视角/语言基调，必须严格遵守）\n"
+                    f"{style}\n\n"
+                )
+                emit(style_text)
+                section_list.append(SectionInfo(
+                    key="style",
+                    label="写作风格指南（必须严格遵守）",
+                    text=style,
+                    tokens=_estimate_tokens(style),
+                ))
 
         # --- 1. Relevant codex entries ---------------------------------
         entity_ids = chapter.all_entities()
@@ -156,15 +191,56 @@ class ContextAssembler:
                 entities=entity_infos,
             ))
 
-        # --- 2. Synopsis + volume summary ------------------------------
+        # --- 2. Big picture: synopsis + hierarchical memory -------------
         synopsis = self.outline.read_synopsis().strip()
         if synopsis:
-            synopsis_text = f"## 全书梗概\n{synopsis}\n\n"
+            synopsis_text = (
+                "## 全书梗概（开书前的原始规划，若与下方实际剧情冲突，以实际剧情为准）\n"
+                f"{synopsis}\n\n"
+            )
             emit(synopsis_text)
             section_list.append(SectionInfo(
-                key="synopsis", label="全书梗概",
+                key="synopsis", label="全书梗概（原始规划）",
                 text=synopsis, tokens=_estimate_tokens(synopsis),
             ))
+
+        # 2a. Rolling story-so-far (coarse long-range memory).
+        story_so_far, ssf_upto = self.outline.read_story_so_far()
+        if story_so_far and ssf_upto < chapter.number:
+            ssf_text = (
+                f"## 全书至今的实际剧情（截至第 {ssf_upto} 章）\n"
+                f"{story_so_far}\n\n"
+            )
+            emit(ssf_text)
+            section_list.append(SectionInfo(
+                key="story_so_far",
+                label=f"全书至今的实际剧情（截至第 {ssf_upto} 章）",
+                text=story_so_far,
+                tokens=_estimate_tokens(story_so_far),
+            ))
+
+        # 2b. Completed-volume recaps (medium-grain memory).
+        recaps = self._gather_volume_recaps(chapter)
+        if recaps:
+            recap_parts: list[str] = ["## 已完成卷的剧情回顾\n"]
+            recap_items: list[dict] = []
+            for vol_num, vol_title, recap in recaps:
+                recap_parts.append(
+                    f"### 第 {vol_num} 卷{f'《{vol_title}》' if vol_title else ''}\n{recap}\n"
+                )
+                recap_items.append({"volume": vol_num, "title": vol_title, "text": recap})
+            recap_parts.append("")
+            recap_full = "".join(recap_parts)
+            emit(recap_full)
+            section_list.append(SectionInfo(
+                key="volume_recaps",
+                label="已完成卷的剧情回顾",
+                text="\n\n".join(r for _, _, r in recaps),
+                tokens=_estimate_tokens(recap_full),
+                sub_items=recap_items,
+            ))
+
+        # 2c. Current volume arc (planning-time).
         if chapter.volume:
             vol = self.outline.read_volume(chapter.volume)
             if vol and vol.arc:
@@ -200,10 +276,10 @@ class ContextAssembler:
                 sub_items=summary_items,
             ))
 
-        # --- 4. Recent full prose (sliding window) ---------------------
+        # --- 4. Recent full prose (sliding window; write mode only) ----
         recent = self.window.recent(
             self.generation.recent_window_chapters, before=chapter.number
-        )
+        ) if for_writing else []
         if recent:
             prose_parts: list[str] = [
                 "## 紧邻的前文（保持文风/人称/时态连贯）\n"
@@ -249,7 +325,27 @@ class ContextAssembler:
                 sub_items=state_items,
             ))
 
-        # --- 6. The chapter beat itself --------------------------------
+        # --- 6. Open plot threads (foreshadowing / suspense) ------------
+        try:
+            open_threads = self.threads.format_open_threads(
+                upto_chapter=chapter.number
+            )
+        except Exception:
+            open_threads = ""
+        if open_threads:
+            threads_text = (
+                "## 未回收的情节线索（伏笔/悬念，不得遗忘或提前泄底）\n"
+                f"{open_threads}\n\n"
+            )
+            emit(threads_text)
+            section_list.append(SectionInfo(
+                key="threads",
+                label="未回收的情节线索",
+                text=open_threads,
+                tokens=_estimate_tokens(threads_text),
+            ))
+
+        # --- 7. The chapter beat itself --------------------------------
         beat_text = self._format_beat(chapter)
         beat_full = (
             f"## 本章任务（必须按此推进剧情）\n{beat_text}"
@@ -393,7 +489,33 @@ class ContextAssembler:
         candidates.sort(key=lambda c: c.number, reverse=True)
         keep = candidates[: self.generation.summary_history]
         keep.sort(key=lambda c: c.number)
-        return [(c.number, c.summary.strip()) for c in keep]
+        out: list[tuple[int, str]] = []
+        for c in keep:
+            text = c.summary.strip()
+            if c.story_date:
+                text = f"（{c.story_date}）{text}"
+            out.append((c.number, text))
+        return out
+
+    def _gather_volume_recaps(
+        self, chapter: ChapterOutline
+    ) -> list[tuple[int, str, str]]:
+        """Recaps of volumes that precede the chapter's volume.
+
+        Returns ``(number, title, recap)`` tuples for earlier volumes that
+        have a realized recap — the medium-grain layer between the coarse
+        story-so-far and the fine recent chapter summaries.
+        """
+        current_vol = chapter.volume
+        out: list[tuple[int, str, str]] = []
+        for vol in self.outline.list_volumes():
+            if not vol.recap.strip():
+                continue
+            if current_vol is not None and vol.number >= current_vol:
+                continue
+            out.append((vol.number, vol.title or "", vol.recap.strip()))
+        out.sort(key=lambda v: v[0])
+        return out
 
     def _format_beat(self, chapter: ChapterOutline) -> str:
         lines: list[str] = []
@@ -401,6 +523,17 @@ class ContextAssembler:
             lines.append(f"章节标题：{chapter.title}")
         if chapter.volume:
             lines.append(f"所属卷：第 {chapter.volume} 卷")
+        if chapter.purpose:
+            lines.append(f"本章叙事功能：{chapter.purpose}")
+        if chapter.value_shift:
+            lines.append(f"情感价值转变：{chapter.value_shift}")
+        if chapter.tension:
+            lines.append(f"张力等级：{chapter.tension}/5")
+        if chapter.story_date:
+            line = f"故事内时间：{chapter.story_date}"
+            if chapter.elapsed:
+                line += f"（距上一章：{chapter.elapsed}）"
+            lines.append(line)
         if chapter.beats:
             lines.append("场景计划：")
             for i, b in enumerate(chapter.beats, 1):
@@ -414,6 +547,8 @@ class ContextAssembler:
                     lines.append(f"    涉及：{'、'.join(b.entities)}")
         else:
             lines.append("（本章未提供具体场景计划，请在保持前文一致的前提下合理推进剧情。）")
+        if chapter.hook:
+            lines.append(f"章末钩子（结尾必须留下）：{chapter.hook}")
         if chapter.notes:
             lines.append("")
             lines.append(f"作者附注：\n{chapter.notes.strip()}")
@@ -533,3 +668,56 @@ def _estimate_tokens(text: str) -> int:
         else:
             ascii_chars += 1
     return max(1, int(cjk / 1.5 + ascii_chars / 4))
+
+
+# ---------------------------------------------------------------------------
+# Write-time context snapshots
+# ---------------------------------------------------------------------------
+def serialize_context(ctx: AssembledContext) -> dict:
+    """JSON-safe dict of an assembled context (for disk / API)."""
+    section_list: list[dict] = []
+    for sec in ctx.section_list:
+        d: dict = {
+            "key": sec.key,
+            "label": sec.label,
+            "text": sec.text,
+            "tokens": sec.tokens,
+        }
+        if sec.entities:
+            d["entities"] = sec.entities
+        if sec.sub_items:
+            d["sub_items"] = sec.sub_items
+        section_list.append(d)
+    return {
+        "text": ctx.text,
+        "section_list": section_list,
+        "codex_used": [e.id for e in ctx.codex_used],
+        "entity_states": [s.entity_id for s in ctx.entity_states_used],
+        "recent_chapters": list(ctx.recent_chapters),
+    }
+
+
+def save_context_snapshot(paths: ProjectPaths, number: int, ctx: AssembledContext) -> Path:
+    """Persist the write-time context next to the draft file."""
+    import json
+    from ..versioning import atomic_write
+
+    path = paths.context_snapshot_file(number)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = serialize_context(ctx)
+    atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+def load_context_snapshot(paths: ProjectPaths, number: int) -> dict | None:
+    """Load a previously saved write-time context, or ``None`` if missing."""
+    import json
+
+    path = paths.context_snapshot_file(number)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None

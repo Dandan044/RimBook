@@ -116,6 +116,13 @@ class GenerationConfig(BaseModel):
     auto_enrich: bool = True  # LLM-driven codex enrichment after each chapter
     auto_checkpoint: bool = True  # auto-checkpoint before each write/revise
     max_checkpoints: int = 50  # prune oldest checkpoints beyond this count
+    # --- hierarchical memory ---
+    story_so_far_every: int = 5  # refresh the rolling story-so-far every N chapters (0 = off)
+    auto_volume_recap: bool = True  # auto-generate recaps for completed volumes
+    # --- plot thread ledger ---
+    track_threads: bool = True  # extract plot-thread deltas after each chapter
+    # --- retrieval ---
+    use_vector_retrieval: bool = False  # wire vector supplement into the default write path
 
 
 class Config(BaseModel):
@@ -220,6 +227,10 @@ def load_config(project_dir: Path, *, global_cfg: dict[str, Any] | None = None) 
         auto_enrich=gen_raw.get("auto_enrich", True),
         auto_checkpoint=gen_raw.get("auto_checkpoint", True),
         max_checkpoints=gen_raw.get("max_checkpoints", 50),
+        story_so_far_every=gen_raw.get("story_so_far_every", 5),
+        auto_volume_recap=gen_raw.get("auto_volume_recap", True),
+        track_threads=gen_raw.get("track_threads", True),
+        use_vector_retrieval=gen_raw.get("use_vector_retrieval", False),
     )
 
     return Config(

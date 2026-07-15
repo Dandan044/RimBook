@@ -73,6 +73,12 @@
                 <el-input v-model="volumeForm.arc" type="textarea" :rows="12" />
               </el-form-item>
               <el-form-item label="结局"><el-input v-model="volumeForm.ending" type="textarea" :rows="4" /></el-form-item>
+              <el-form-item v-if="editingVolume.recap" label="回顾">
+                <el-alert type="info" :closable="false" class="recap-alert">
+                  <template #title>实际剧情回顾（由摘要自动生成，只读）</template>
+                  <div class="recap-text">{{ editingVolume.recap }}</div>
+                </el-alert>
+              </el-form-item>
             </el-form>
             <div class="editor-footer">
               <el-button type="primary" @click="saveVolume">
@@ -104,6 +110,30 @@
                 <el-select v-model="chapterForm.tags" multiple filterable allow-create default-first-option />
               </el-form-item>
             </el-form>
+
+            <div class="pacing-section">
+              <h3 class="beats-heading">节奏与时间线</h3>
+              <el-form label-width="80px" size="small">
+                <el-form-item label="叙事功能">
+                  <el-input v-model="chapterForm.purpose" placeholder="本章的叙事功能，如：推进主线 / 铺垫伏笔 / 情感缓冲" />
+                </el-form-item>
+                <el-form-item label="价值转变">
+                  <el-input v-model="chapterForm.value_shift" placeholder="主角处境的变化，如：安全→危险、希望→绝望" />
+                </el-form-item>
+                <el-form-item label="张力">
+                  <el-rate v-model="chapterForm.tension" :max="5" show-score score-template="{value}/5" clearable />
+                </el-form-item>
+                <el-form-item label="章末钩子">
+                  <el-input v-model="chapterForm.hook" placeholder="章节结尾的悬念/钩子" />
+                </el-form-item>
+                <el-form-item label="故事日期">
+                  <el-input v-model="chapterForm.story_date" placeholder="故事内时间，如：第三年春 / 王历1024年冬" style="max-width:300px" />
+                </el-form-item>
+                <el-form-item label="经过时长">
+                  <el-input v-model="chapterForm.elapsed" placeholder="本章经过的时间，如：三天 / 半个时辰" style="max-width:300px" />
+                </el-form-item>
+              </el-form>
+            </div>
 
             <div class="beats-section">
               <h3 class="beats-heading">场景 Beat</h3>
@@ -187,6 +217,7 @@ const volumeForm = reactive({ title: '', arc: '', ending: '' })
 const chapterForm = reactive({
   title: '', volume: null as number | null, entities: [] as string[],
   tags: [] as string[], beats: [] as SceneBeat[], notes: '',
+  purpose: '', value_shift: '', tension: 0, hook: '', story_date: '', elapsed: '',
 })
 
 const treeData = computed(() => {
@@ -237,6 +268,12 @@ function onNodeClick(node: any) {
       tags: [...node.chapter.tags],
       beats: node.chapter.beats.map((b: SceneBeat) => ({ ...b, entities: [...b.entities] })),
       notes: node.chapter.notes,
+      purpose: node.chapter.purpose || '',
+      value_shift: node.chapter.value_shift || '',
+      tension: node.chapter.tension || 0,
+      hook: node.chapter.hook || '',
+      story_date: node.chapter.story_date || '',
+      elapsed: node.chapter.elapsed || '',
     })
   }
 }
@@ -313,6 +350,8 @@ async function generateBeat() {
     Object.assign(chapterForm, {
       title: c.title, volume: c.volume, entities: [...c.entities], tags: [...c.tags],
       beats: c.beats.map(b => ({ ...b, entities: [...b.entities] })), notes: c.notes,
+      purpose: c.purpose || '', value_shift: c.value_shift || '', tension: c.tension || 0,
+      hook: c.hook || '', story_date: c.story_date || '', elapsed: c.elapsed || '',
     })
     editingChapter.value = c
     ElMessage.success('Beat 已重新生成')
@@ -333,6 +372,9 @@ async function saveChapter() {
     title: chapterForm.title, volume: chapterForm.volume,
     entities: chapterForm.entities, tags: chapterForm.tags,
     beats: chapterForm.beats, notes: chapterForm.notes,
+    purpose: chapterForm.purpose, value_shift: chapterForm.value_shift,
+    tension: chapterForm.tension, hook: chapterForm.hook,
+    story_date: chapterForm.story_date, elapsed: chapterForm.elapsed,
   } as any)
   ElMessage.success('已保存')
   await fetchData()
@@ -528,6 +570,25 @@ onMounted(fetchData)
 
 .beat-form {
   margin: 0;
+}
+
+/* ===== Pacing Section ===== */
+.pacing-section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rb-border-light);
+}
+
+.recap-alert {
+  width: 100%;
+}
+
+.recap-text {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--rb-text-secondary);
+  margin-top: 6px;
 }
 
 /* ===== Empty Editor ===== */

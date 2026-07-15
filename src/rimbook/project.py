@@ -72,6 +72,26 @@ class ProjectPaths:
         return self.root / "outline" / "synopsis.md"
 
     @property
+    def style_file(self) -> Path:
+        """Project style bible (voice card) — narrative POV/tone/taboo rules."""
+        return self.root / "outline" / "style.md"
+
+    @property
+    def story_so_far_file(self) -> Path:
+        """Rolling whole-book recap, updated as chapters are written."""
+        return self.root / "outline" / "story_so_far.md"
+
+    @property
+    def threads_file(self) -> Path:
+        """Plot-thread ledger (foreshadowing / suspense / promises)."""
+        return self.state_dir / "threads.yaml"
+
+    @property
+    def reviews_dir(self) -> Path:
+        """Macro editorial review reports."""
+        return self.state_dir / "reviews"
+
+    @property
     def volumes_dir(self) -> Path:
         return self.root / "outline" / "volumes"
 
@@ -92,6 +112,10 @@ class ProjectPaths:
 
     def draft_file(self, number: int) -> Path:
         return self.drafts_dir / f"ch{number:03d}.md"
+
+    def context_snapshot_file(self, number: int) -> Path:
+        """Write-time assembled context for chapter *number* (JSON)."""
+        return self.drafts_dir / f"ch{number:03d}.context.json"
 
     @property
     def final_dir(self) -> Path:

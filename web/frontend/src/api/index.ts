@@ -65,6 +65,13 @@ export interface ChapterOutline {
   beats: SceneBeat[]
   notes: string
   summary: string
+  purpose: string
+  value_shift: string
+  tension: number
+  hook: string
+  story_date: string
+  elapsed: string
+  has_draft?: boolean
 }
 
 export interface VolumeOutline {
@@ -73,6 +80,7 @@ export interface VolumeOutline {
   arc: string
   chapters: number[]
   ending: string
+  recap: string
 }
 
 export interface CheckIssue {
@@ -165,6 +173,65 @@ export const updateChapter = (projectId: string, number: number, data: Partial<C
 export const regenerateChapter = (projectId: string, number: number, data: { volume?: number; title?: string; hint?: string }) =>
   http.post<ChapterOutline>(`/projects/${projectId}/outline/chapters/${number}/regenerate`, data).then(r => r.data)
 
+// ---------- Narrative: style bible / threads / recap / review ----------
+
+export interface PlotThread {
+  id: string
+  description: string
+  type: string          // foreshadow | suspense | promise
+  status: string        // open | progressed | resolved
+  planted_chapter: number
+  expected_resolve_chapter: number | null
+  resolved_chapter: number | null
+  updates: { chapter: number; note: string }[]
+}
+
+export const getStyle = (projectId: string) =>
+  http.get<{ text: string }>(`/projects/${projectId}/style`).then(r => r.data)
+
+export const updateStyle = (projectId: string, text: string) =>
+  http.put<{ ok: boolean }>(`/projects/${projectId}/style`, { text }).then(r => r.data)
+
+export const generateStyle = (projectId: string, chapters: number = 3) =>
+  http.post<{ text: string }>(`/projects/${projectId}/style/generate`, { chapters }).then(r => r.data)
+
+export const listThreads = (projectId: string, includeResolved: boolean = true) =>
+  http.get<{ threads: PlotThread[] }>(`/projects/${projectId}/threads`, {
+    params: { include_resolved: includeResolved },
+  }).then(r => r.data)
+
+export const updateThread = (
+  projectId: string, threadId: string,
+  data: Partial<Pick<PlotThread, 'description' | 'type' | 'status' | 'expected_resolve_chapter'>>,
+) =>
+  http.put<{ ok: boolean }>(`/projects/${projectId}/threads/${encodeURIComponent(threadId)}`, data).then(r => r.data)
+
+export const deleteThread = (projectId: string, threadId: string) =>
+  http.delete<{ ok: boolean }>(`/projects/${projectId}/threads/${encodeURIComponent(threadId)}`).then(r => r.data)
+
+export const getStorySoFar = (projectId: string) =>
+  http.get<{ text: string; upto_chapter: number }>(`/projects/${projectId}/recap/story`).then(r => r.data)
+
+export const refreshStorySoFar = (projectId: string) =>
+  http.post<{ text: string; upto_chapter: number }>(`/projects/${projectId}/recap/story`).then(r => r.data)
+
+export const refreshVolumeRecap = (projectId: string, number: number) =>
+  http.post<{ recap: string }>(`/projects/${projectId}/recap/volume/${number}`).then(r => r.data)
+
+export const runMacroReview = (
+  projectId: string,
+  data: { volume?: number; from_chapter?: number; to_chapter?: number },
+) =>
+  http.post<{ scope: string; report: string; saved_as: string; chapters: number }>(
+    `/projects/${projectId}/review`, data,
+  ).then(r => r.data)
+
+export const listReviews = (projectId: string) =>
+  http.get<{ reviews: { name: string }[] }>(`/projects/${projectId}/reviews`).then(r => r.data)
+
+export const getReview = (projectId: string, name: string) =>
+  http.get<{ name: string; text: string }>(`/projects/${projectId}/reviews/${encodeURIComponent(name)}`).then(r => r.data)
+
 // ---------- Writer ----------
 
 export const getDraft = (projectId: string, number: number) =>
@@ -173,8 +240,8 @@ export const getDraft = (projectId: string, number: number) =>
 export const updateDraft = (projectId: string, number: number, text: string) =>
   http.put(`/projects/${projectId}/drafts/${number}`, { text }).then(r => r.data)
 
-export const previewContext = (projectId: string, number: number) =>
-  http.get(`/projects/${projectId}/context/${number}`).then(r => r.data)
+export const previewContext = (projectId: string, number: number, live: boolean = false) =>
+  http.get(`/projects/${projectId}/context/${number}`, { params: { live } }).then(r => r.data)
 
 export const checkChapter = (projectId: string, number: number, fix: boolean = false) =>
   http.post(`/projects/${projectId}/check/${number}`, { fix }).then(r => r.data)
@@ -292,6 +359,13 @@ export const getBranchHistory = (projectId: string, name: string) =>
   http.get<{ branch: string; history: CheckpointInfo[]; fork_points: Record<string, string[]> }>(
     `/projects/${projectId}/branches/${name}/history`
   ).then(r => r.data)
+
+/** Fork a new branch from the last pre-write checkpoint of chapter *number* and switch to it. */
+export const forkForRegen = (projectId: string, number: number, branchName?: string) =>
+  http.post<{
+    ok: boolean; branch: string; from_checkpoint: string; from_checkpoint_label: string
+    previous_branch: string; saved_checkpoint: string | null; hint: string
+  }>(`/projects/${projectId}/chapters/${number}/fork-for-regen`, { branch_name: branchName || '' }).then(r => r.data)
 
 // ---------- Server management ----------
 

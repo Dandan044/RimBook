@@ -19,6 +19,7 @@ from typing import Any
 import yaml
 
 from ..llm import LLMClient, Prompts
+from ..llm.trace import NULL_TRACE, TraceStore
 from ..outline.store import OutlineStore
 from .entity_state import EntityState, EntityStateStore, KnowledgeItem, PossessionItem
 
@@ -49,10 +50,20 @@ class EntityDelta:
 class Summarizer:
     """Generate chapter summaries and entity-state deltas."""
 
-    def __init__(self, llm: LLMClient, prompts: Prompts, outline: OutlineStore) -> None:
+    def __init__(
+        self,
+        llm: LLMClient,
+        prompts: Prompts,
+        outline: OutlineStore,
+        *,
+        trace: TraceStore | None = None,
+        project_name: str = "",
+    ) -> None:
         self.llm = llm
         self.prompts = prompts
         self.outline = outline
+        self.trace = trace if trace is not None else NULL_TRACE
+        self.project_name = project_name
 
     def summarize(self, chapter_number: int, chapter_text: str) -> str:
         """Generate and persist a summary for a written chapter."""
@@ -63,23 +74,118 @@ class Summarizer:
                 chapter_text=chapter_text,
             ),
         )
-        result = self.llm.generate(
-            messages,
-            temperature=0.3,
-            model=self.llm.config.effective_check_model,
-        )
+        with self.trace.begin(
+            "summarizer", project=self.project_name, chapter=chapter_number
+        ) as t:
+            result = self.llm.generate(
+                messages,
+                temperature=0.3,
+                model=self.llm.config.effective_check_model,
+            )
+            t.record(messages, result)
         summary = result.content.strip()
         # Persist back into the chapter outline file.
         self.outline.update_chapter_summary(chapter_number, summary)
         return summary
+
+    # ------------------------------------------------------------------
+    # Hierarchical memory: volume recap + story-so-far
+    # ------------------------------------------------------------------
+    def summarize_volume(self, volume_number: int, *, persist: bool = True) -> str:
+        """Compress a volume's chapter summaries into a realized recap.
+
+        Unlike the planning-time ``arc``, the recap reflects what *actually*
+        happened. It is injected into future chapters' context in place of
+        the individual chapter summaries once they scroll out of the window.
+        """
+        vol = self.outline.read_volume(volume_number)
+        if vol is None:
+            raise FileNotFoundError(f"Volume {volume_number} has no outline")
+        chapters = [
+            c for c in self.outline.list_chapters()
+            if c.volume == volume_number and c.summary.strip()
+        ]
+        if not chapters:
+            return ""
+        blob = "\n".join(
+            f"第 {c.number} 章《{c.title}》：{c.summary.strip()}" for c in chapters
+        )
+        messages = self.llm.as_chat(
+            system=self.prompts.volume_recap_system,
+            user=self.prompts.volume_recap_user.format(
+                volume_number=volume_number,
+                volume_title=vol.title or "",
+                chapter_summaries=blob,
+            ),
+        )
+        with self.trace.begin(
+            "volume_recap", project=self.project_name, volume=volume_number
+        ) as t:
+            result = self.llm.generate(
+                messages,
+                temperature=0.3,
+                model=self.llm.config.effective_check_model,
+            )
+            t.record(messages, result)
+        recap = result.content.strip()
+        if persist and recap:
+            vol.recap = recap
+            self.outline.write_volume(vol)
+        return recap
+
+    def update_story_so_far(self, upto_chapter: int, *, persist: bool = True) -> str:
+        """Refresh the rolling whole-book recap up to *upto_chapter*.
+
+        Incremental: takes the previous story-so-far text plus the summaries
+        of chapters written since, and asks the LLM to fold them together.
+        """
+        previous, prev_upto = self.outline.read_story_so_far()
+        new_chapters = [
+            c for c in self.outline.list_chapters()
+            if prev_upto < c.number <= upto_chapter and c.summary.strip()
+        ]
+        if not new_chapters:
+            return previous
+        new_blob = "\n".join(
+            f"第 {c.number} 章《{c.title}》：{c.summary.strip()}" for c in new_chapters
+        )
+        messages = self.llm.as_chat(
+            system=self.prompts.story_so_far_system,
+            user=self.prompts.story_so_far_user.format(
+                prev_upto=prev_upto or 0,
+                previous=previous or "（尚无，故事刚开始）",
+                new_summaries=new_blob,
+                upto=upto_chapter,
+            ),
+        )
+        with self.trace.begin(
+            "story_so_far", project=self.project_name, chapter=upto_chapter
+        ) as t:
+            result = self.llm.generate(
+                messages,
+                temperature=0.3,
+                model=self.llm.config.effective_check_model,
+            )
+            t.record(messages, result)
+        text = result.content.strip()
+        if persist and text:
+            self.outline.write_story_so_far(text, upto_chapter)
+        return text
 
     def extract_entity_deltas(
         self,
         chapter_number: int,
         chapter_text: str,
         entity_ids: list[str],
+        *,
+        codex=None,
     ) -> list[EntityDelta]:
-        """Ask the model how each entity's state changed during the chapter."""
+        """Ask the model how each entity's state changed during the chapter.
+
+        *codex* (optional) lets the parser normalize drifted entity ids back
+        to their canonical form so deltas are recorded against the right
+        entity's state file — without it, a drifted id is silently dropped.
+        """
         if not entity_ids:
             return []
         messages = self.llm.as_chat(
@@ -90,12 +196,16 @@ class Summarizer:
                 entity_ids=entity_ids,
             ),
         )
-        data = self.llm.generate_json(
-            messages,
-            model=self.llm.config.effective_check_model,
-            temperature=0.0,
-        )
-        return _parse_deltas(data, entity_ids)
+        with self.trace.begin(
+            "entity_delta", project=self.project_name, chapter=chapter_number
+        ) as t:
+            data = self.llm.generate_json(
+                messages,
+                model=self.llm.config.effective_check_model,
+                temperature=0.0,
+            )
+            t.record(messages, data, model=self.llm.config.effective_check_model)
+        return _parse_deltas(data, entity_ids, codex=codex)
 
     @staticmethod
     def apply_deltas(
@@ -143,17 +253,46 @@ class Summarizer:
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
-def _parse_deltas(data: dict[str, Any], entity_ids: list[str]) -> list[EntityDelta]:
+def _parse_deltas(
+    data: dict[str, Any],
+    entity_ids: list[str],
+    *,
+    codex=None,
+) -> list[EntityDelta]:
     raw = data.get("entities") or []
     out: list[EntityDelta] = []
     known = set(entity_ids)
+    # Lazily import resolve to avoid a heavy import in callers that never
+    # pass a codex (e.g. plain summarization with no state extraction).
+    resolve_entity_id = None
+    if codex is not None:
+        from ..codex.resolve import resolve_entity_id
+
     for item in raw:
         if not isinstance(item, dict):
             continue
         eid = str(item.get("entity_id") or "").strip()
         if not eid:
             continue
+
+        # Defensive: if a ``new:`` prefix survived into the entity id (e.g.
+        # because the planner was called without a codex before the June 2024
+        # fix), silently strip it.  The colon is illegal in a Windows
+        # filename, and ``new:`` serves no purpose after entity creation.
+        if eid.startswith("new:"):
+            from ..codex.resolve import slugify
+
+            eid = slugify(eid[len("new:"):])
+
         # Only accept ids we asked about, to avoid hallucinated entities.
+        # If the LLM returned a drifted id (e.g. ``char_linyuan`` instead of
+        # the canonical ``char_lin_yuan``), try resolving it through the
+        # codex first so the delta lands on the right entity's state file
+        # instead of being silently dropped.
+        if known and eid not in known and resolve_entity_id is not None:
+            resolved = resolve_entity_id(eid, codex)
+            if resolved.is_existing and resolved.canonical_id in known:
+                eid = resolved.canonical_id
         if known and eid not in known:
             continue
         out.append(

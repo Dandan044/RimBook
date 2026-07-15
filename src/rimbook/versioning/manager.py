@@ -172,15 +172,88 @@ class VersionManager:
         branches[current_branch] = saved
         self._write_branches(branches)
 
-        # Restore target branch.
+        # Restore target branch with clean state (delete stale files).
         target_head = branches.get(name)
         if target_head:
-            self.restore_checkpoint(target_head)
+            self._clean_restore(target_head)
 
         self._write_head(name)
         self._append_journal({"op": "switch_branch", "from": current_branch, "to": name, "saved": saved})
         logger.info("Switched to branch '%s' (saved current as %s)", name, saved)
         return saved
+
+    def _clean_restore(self, checkpoint_name: str) -> None:
+        """Delete all project files (except .versions/) then restore from
+        the full state reconstructed by walking the checkpoint parent chain.
+
+        Unlike ``restore_checkpoint``, this method removes files that exist
+        in the project but not in the checkpoint — preventing stale data
+        from leaking across branches.
+        """
+        snap_dir = self.versions_dir / checkpoint_name
+        if not snap_dir.exists():
+            raise FileNotFoundError(f"Checkpoint '{checkpoint_name}' not found")
+
+        # Reconstruct full file state by walking the parent chain.
+        # Newer checkpoints win: iterate oldest → newest, overwriting.
+        file_map = self._reconstruct_full_state(checkpoint_name)
+
+        # Delete all project files except .versions/.
+        for item in self.project_dir.iterdir():
+            if item.name == ".versions":
+                continue
+            if item.is_dir():
+                shutil.rmtree(item)
+            elif item.is_file():
+                item.unlink()
+
+        # Restore files from the reconstructed set.
+        for rel, src_dir in file_map.items():
+            src = src_dir / rel
+            if src.exists():
+                dest = self.project_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(src), str(dest))
+
+        self._append_journal({"op": "clean_restore", "checkpoint": checkpoint_name, "files": len(file_map)})
+        logger.info("Clean restore from %s (%d files)", checkpoint_name, len(file_map))
+
+    def _reconstruct_full_state(self, checkpoint_name: str) -> dict[str, Path]:
+        """Walk the parent chain from *checkpoint_name* backwards, collecting
+        all files.  Returns ``{rel_path: source_checkpoint_dir}`` where newer
+        checkpoints take precedence (their entries overwrite older ones).
+        """
+        # Build index: checkpoint name → CheckpointInfo.
+        index: dict[str, "CheckpointInfo"] = {}
+        for entry in self.versions_dir.iterdir():
+            if not entry.is_dir():
+                continue
+            info = self._read_checkpoint_info(entry)
+            if info:
+                index[info.name] = info
+
+        # Walk parent chain, collect checkpoints oldest → newest.
+        chain: list[str] = []
+        current = checkpoint_name
+        visited: set[str] = set()
+        while current and current not in visited:
+            visited.add(current)
+            info = index.get(current)
+            if info is None:
+                break
+            chain.append(current)
+            current = info.parent
+        chain.reverse()  # oldest first
+
+        # Accumulate files; newer checkpoints overwrite older ones.
+        file_map: dict[str, Path] = {}
+        for cp_name in chain:
+            cp_dir = self.versions_dir / cp_name
+            for item in cp_dir.rglob("*"):
+                if item.is_file() and item.name != ".manifest":
+                    rel = str(item.relative_to(cp_dir))
+                    file_map[rel] = cp_dir
+        return file_map
 
     def delete_branch(self, name: str) -> bool:
         if name == self.get_current_branch():
@@ -269,14 +342,27 @@ class VersionManager:
                 result.append(info)
         return result
 
-    def restore_checkpoint(self, name: str, files: list[Path] | None = None) -> dict:
-        """Restore files from a checkpoint. Returns {restored, skipped}."""
+    def restore_checkpoint(
+        self, name: str, files: list[Path] | None = None, *,
+        delete_missing: bool = False,
+    ) -> dict:
+        """Restore files from a checkpoint.
+
+        Returns ``{restored, skipped, deleted}``.
+
+        If *delete_missing* is True, files in the *files* list that don't
+        exist in the snapshot are **deleted** from the project — they were
+        created after the checkpoint was taken and should be removed to
+        fully restore the pre-checkpoint state.  Only meaningful when
+        *files* is provided (partial restore).
+        """
         snap_dir = self.versions_dir / name
         if not snap_dir.exists() or not snap_dir.is_dir():
             raise FileNotFoundError(f"Checkpoint '{name}' not found")
 
         restored = 0
         skipped = 0
+        deleted = 0
 
         if files is None:
             for item in snap_dir.rglob("*"):
@@ -298,12 +384,21 @@ class VersionManager:
                     abs_path.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(str(src), str(abs_path))
                     restored += 1
+                elif delete_missing and abs_path.exists():
+                    abs_path.unlink()
+                    deleted += 1
                 else:
                     skipped += 1
 
-        self._append_journal({"op": "restore", "checkpoint": name, "restored": restored, "skipped": skipped})
-        logger.info("Restored checkpoint %s (%d files, %d skipped)", name, restored, skipped)
-        return {"restored": restored, "skipped": skipped}
+        self._append_journal({
+            "op": "restore", "checkpoint": name,
+            "restored": restored, "skipped": skipped, "deleted": deleted,
+        })
+        logger.info(
+            "Restored checkpoint %s (%d restored, %d skipped, %d deleted)",
+            name, restored, skipped, deleted,
+        )
+        return {"restored": restored, "skipped": skipped, "deleted": deleted}
 
     def delete_checkpoint(self, name: str) -> bool:
         """Delete a checkpoint directory. Refuse if any branch points to it."""
@@ -423,7 +518,10 @@ class VersionManager:
         for item in self.project_dir.iterdir():
             if item.name == ".versions":
                 continue
-            for f in item.rglob("*"):
-                if f.is_file():
-                    result.append(f)
+            if item.is_file():
+                result.append(item)
+            elif item.is_dir():
+                for f in item.rglob("*"):
+                    if f.is_file():
+                        result.append(f)
         return result

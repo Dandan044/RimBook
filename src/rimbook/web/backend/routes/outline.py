@@ -36,6 +36,12 @@ class ChapterOutlineIn(BaseModel):
     tags: list[str] = []
     beats: list[SceneBeatIn] = []
     notes: str = ""
+    purpose: str = ""
+    value_shift: str = ""
+    tension: int = 0
+    hook: str = ""
+    story_date: str = ""
+    elapsed: str = ""
 
 
 class ChapterOutlineOut(BaseModel):
@@ -47,6 +53,13 @@ class ChapterOutlineOut(BaseModel):
     beats: list[SceneBeatOut]
     notes: str
     summary: str
+    purpose: str = ""
+    value_shift: str = ""
+    tension: int = 0
+    hook: str = ""
+    story_date: str = ""
+    elapsed: str = ""
+    has_draft: bool = False
 
 
 class VolumeOutlineIn(BaseModel):
@@ -61,6 +74,7 @@ class VolumeOutlineOut(BaseModel):
     title: str
     arc: str
     chapters: list[int]
+    recap: str = ""
     ending: str
 
 
@@ -128,7 +142,10 @@ def get_volume(number: int, deps: ProjectDeps = Depends(get_project_deps)) -> Vo
 
 @router.put("/volumes/{number}", response_model=VolumeOutlineOut)
 def update_volume(number: int, req: VolumeOutlineIn, deps: ProjectDeps = Depends(get_project_deps)) -> VolumeOutlineOut:
-    vol = VolumeOutline(number=number, title=req.title, arc=req.arc, chapters=req.chapters, ending=req.ending)
+    # Preserve the realized recap — it is only produced by the summarizer.
+    existing = deps.outline.read_volume(number)
+    recap = existing.recap if existing else ""
+    vol = VolumeOutline(number=number, title=req.title, arc=req.arc, chapters=req.chapters, ending=req.ending, recap=recap)
     deps.outline.write_volume(vol)
     return _vol_out(vol)
 
@@ -138,7 +155,7 @@ def update_volume(number: int, req: VolumeOutlineIn, deps: ProjectDeps = Depends
 @router.get("/chapters", response_model=list[ChapterOutlineOut])
 def list_chapters(deps: ProjectDeps = Depends(get_project_deps)) -> list[ChapterOutlineOut]:
     chapters = deps.outline.list_chapters()
-    return [_ch_out(c) for c in chapters]
+    return [_ch_out(c, deps.paths) for c in chapters]
 
 
 @router.post("/chapters", response_model=ChapterOutlineOut)
@@ -148,7 +165,7 @@ def plan_chapter(req: PlanChapterRequest, deps: ProjectDeps = Depends(get_projec
     task_registry.register(deps.project_dir.name, "plan_chapter", number, "正在规划章节…")
     try:
         ch = deps.planner.plan_chapter(number, volume=req.volume, title=req.title, hint=req.hint)
-        return _ch_out(ch)
+        return _ch_out(ch, deps.paths)
     finally:
         task_registry.unregister(deps.project_dir.name, "plan_chapter", number)
 
@@ -159,7 +176,7 @@ def regenerate_chapter(number: int, req: PlanChapterRequest, deps: ProjectDeps =
     task_registry.register(deps.project_dir.name, "plan_chapter", number, "正在重新规划…")
     try:
         ch = deps.planner.plan_chapter(number, volume=req.volume, title=req.title, hint=req.hint)
-        return _ch_out(ch)
+        return _ch_out(ch, deps.paths)
     finally:
         task_registry.unregister(deps.project_dir.name, "plan_chapter", number)
 
@@ -167,7 +184,7 @@ def regenerate_chapter(number: int, req: PlanChapterRequest, deps: ProjectDeps =
 @router.get("/chapters/{number}", response_model=ChapterOutlineOut | None)
 def get_chapter(number: int, deps: ProjectDeps = Depends(get_project_deps)) -> ChapterOutlineOut | None:
     ch = deps.outline.read_chapter(number)
-    return _ch_out(ch) if ch else None
+    return _ch_out(ch, deps.paths) if ch else None
 
 
 @router.put("/chapters/{number}", response_model=ChapterOutlineOut)
@@ -176,6 +193,9 @@ def update_chapter(number: int, req: ChapterOutlineIn, deps: ProjectDeps = Depen
     ch = ChapterOutline(
         number=number, title=req.title, volume=req.volume,
         entities=req.entities, tags=req.tags, beats=beats, notes=req.notes,
+        purpose=req.purpose, value_shift=req.value_shift,
+        tension=min(max(req.tension, 0), 5), hook=req.hook,
+        story_date=req.story_date, elapsed=req.elapsed,
     )
     # Always preserve existing summary — it only changes via the summarizer
     # after a chapter write, never from manual outline editing.
@@ -183,19 +203,25 @@ def update_chapter(number: int, req: ChapterOutlineIn, deps: ProjectDeps = Depen
     if existing and existing.summary:
         ch.summary = existing.summary
     deps.outline.write_chapter(ch)
-    return _ch_out(ch)
+    return _ch_out(ch, deps.paths)
 
 
 # ---- helpers ----
 
 def _vol_out(v: VolumeOutline) -> VolumeOutlineOut:
-    return VolumeOutlineOut(number=v.number, title=v.title, arc=v.arc, chapters=v.chapters, ending=v.ending)
+    return VolumeOutlineOut(number=v.number, title=v.title, arc=v.arc, chapters=v.chapters, ending=v.ending, recap=v.recap)
 
 
-def _ch_out(c: ChapterOutline) -> ChapterOutlineOut:
+def _ch_out(c: ChapterOutline, paths=None) -> ChapterOutlineOut:
+    has_draft = False
+    if paths is not None:
+        has_draft = paths.draft_file(c.number).exists()
     return ChapterOutlineOut(
         number=c.number, title=c.title, volume=c.volume,
         entities=c.entities, tags=c.tags,
         beats=[SceneBeatOut(goal=b.goal, conflict=b.conflict, outcome=b.outcome, entities=b.entities) for b in c.beats],
         notes=c.notes, summary=c.summary,
+        purpose=c.purpose, value_shift=c.value_shift, tension=c.tension,
+        hook=c.hook, story_date=c.story_date, elapsed=c.elapsed,
+        has_draft=has_draft,
     )

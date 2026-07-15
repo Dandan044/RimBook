@@ -26,11 +26,13 @@ from . import __version__
 from .codex import CodexEntry, CodexStore
 from .config import load_config
 from .llm import LLMClient, Prompts, load_prompts
+from .llm.trace import TraceStore
 from .memory import (
     ContextAssembler,
     EntityStateStore,
     SlidingWindow,
     Summarizer,
+    ThreadStore,
 )
 from .outline import OutlineStore
 from .pipeline import Checker, Planner, Writer
@@ -96,6 +98,22 @@ class Deps:
         return SlidingWindow(self.paths)
 
     @property
+    def threads(self) -> ThreadStore:
+        return ThreadStore(self.paths)
+
+    @property
+    def retriever(self):
+        """Optional vector retriever, wired in when ``use_vector_retrieval`` is on."""
+        if not self.config.generation.use_vector_retrieval:
+            return None
+        try:
+            from .retrieval import VectorRetriever
+
+            return VectorRetriever(self.paths, self.llm)
+        except Exception:
+            return None
+
+    @property
     def assembler(self) -> ContextAssembler:
         return ContextAssembler(
             self.paths,
@@ -104,12 +122,20 @@ class Deps:
             entity_state=self.entity_state,
             window=self.window,
             generation=self.config.generation,
-            retriever=None,  # vector supplement wired in explicitly when needed
+            retriever=self.retriever,
+            threads=self.threads,
         )
 
     @property
+    def trace(self) -> TraceStore:
+        return TraceStore(self.project_dir)
+
+    @property
     def summarizer(self) -> Summarizer:
-        return Summarizer(self.llm, self.prompts, self.outline)
+        return Summarizer(
+            self.llm, self.prompts, self.outline,
+            trace=self.trace, project_name=self.project_dir.name,
+        )
 
     @property
     def writer(self) -> Writer:
@@ -123,15 +149,29 @@ class Deps:
             entity_state=self.entity_state,
             codex=self.codex,
             generation=self.config.generation,
+            trace=self.trace,
+            project_name=self.project_dir.name,
         )
 
     @property
     def planner(self) -> Planner:
-        return Planner(self.llm, self.prompts, self.outline, codex=self.codex)
+        return Planner(
+            self.llm, self.prompts, self.outline,
+            codex=self.codex, threads=self.threads, trace=self.trace,
+            project_name=self.project_dir.name,
+        )
 
     @property
     def checker(self) -> Checker:
-        return Checker(self.paths, llm=self.llm, prompts=self.prompts)
+        return Checker(
+            self.paths,
+            llm=self.llm,
+            prompts=self.prompts,
+            assembler=self.assembler,
+            outline=self.outline,
+            trace=self.trace,
+            project_name=self.project_dir.name,
+        )
 
 
 def _resolve_project(project: Optional[Path]) -> Path:
@@ -190,15 +230,45 @@ def init(
     cfg_path = root / "config.yaml"
     cfg_path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
 
+    # Style bible template — fill in before writing (or run `rimbook style generate`).
+    style_path = paths.style_file
+    if not style_path.exists():
+        style_path.write_text(_STYLE_TEMPLATE, encoding="utf-8")
+
     console.print(Panel.fit(
         f"[green]已创建项目[/green] [bold]{title}[/bold]\n"
         f"路径：{root}\n\n"
         f"下一步：\n"
         f"  1. 编辑 {cfg_path.name} 填入 API key（或设置环境变量 LLM_API_KEY）\n"
-        f"  2. cd {name} && rimbook codex add  添加实体/设定\n"
-        f"  3. rimbook outline synopsis  生成全书梗概",
+        f"  2. 编辑 outline/style.md 定义写作风格（人称/基调/禁忌）\n"
+        f"  3. cd {name} && rimbook codex add  添加实体/设定\n"
+        f"  4. rimbook outline synopsis  生成全书梗概",
         title="RimBook 项目初始化完成",
     ))
+
+
+_STYLE_TEMPLATE = """\
+<!-- 写作风格指南（style bible）。写作与修订时会整段注入上下文，模型必须遵守。
+     留空的条目可删除；也可以在写完几章后运行 `rimbook style generate` 由 LLM 反推。 -->
+
+## 叙事人称与视角
+（示例：第三人称有限视角，单章单视角，视角人物为该章主要行动者。）
+
+## 时态与叙事距离
+（示例：过去时；贴近人物内心，但避免直接的心理独白泛滥。）
+
+## 语言基调与句式
+（示例：冷峻克制，短句为主；动作场面加快节奏，抒情段落不超过三句。）
+
+## 对话风格
+（示例：对话占比约四成；人物用词须符合各自档案中的语言风格画像。）
+
+## 禁忌清单
+（示例：禁止翻译腔；禁止"突然""顿时"滥用；禁止以"殊不知"上帝视角插评。）
+
+## 示例段落
+（粘贴一到两段最能代表理想文风的段落。）
+"""
 
 
 # ======================================================================
@@ -556,6 +626,8 @@ def enrich(
         entity_state=deps.entity_state,
         summarizer=deps.summarizer,
         generation=deps.config.generation,
+        trace=deps.trace,
+        project_name=deps.project_dir.name,
     )
 
     if dry_run:
@@ -591,6 +663,12 @@ def _print_enrichment(result) -> None:
         console.print(f"[red]发现矛盾（{len(result.contradictions)} 处）：[/red]")
         for c in result.contradictions:
             console.print(f"  • [{c.entity_id}] {c.detail}")
+    if result.thread_changes and any(result.thread_changes.values()):
+        tc = result.thread_changes
+        console.print(
+            f"[dim]情节线索：新埋 {tc.get('created', 0)}，"
+            f"推进 {tc.get('progressed', 0)}，回收 {tc.get('resolved', 0)}[/dim]"
+        )
     if result.summary:
         console.print(f"[dim]{result.summary}[/dim]")
 
@@ -605,9 +683,10 @@ def _run_check_and_maybe_fix(
         console.print(f"[cyan]校验中（最多 {max_rounds} 轮自动修复）…[/cyan]")
 
         def apply_fix(text: str, issues_blob: str) -> str:
-            console.print(f"[yellow]发现需修订的问题，正在自动修复…[/yellow]")
-            res = deps.writer.revise(number, draft_text=text, instructions=f"请解决以下审校问题：\n{issues_blob}")
-            return Path(res.draft_path).read_text(encoding="utf-8").strip()
+            console.print(f"[yellow]发现需修订的问题，正在定点修复…[/yellow]")
+            # Minimal-fix path: patch only the problematic passages instead of
+            # re-writing the whole chapter (preserves voice; see fix_* prompts).
+            return deps.writer.apply_minimal_fix(number, text, issues_blob)
 
         report = deps.checker.check_and_fix(number, max_rounds=max_rounds, apply_fix=apply_fix)
     else:
@@ -641,6 +720,213 @@ def _print_check_report(report) -> None:
         console.print(table)
     else:
         console.print("[green]未发现一致性问题。[/green]")
+
+
+# ======================================================================
+# style / recap / threads / review commands
+# ======================================================================
+style_app = typer.Typer(help="管理写作风格指南（style bible）。")
+app.add_typer(style_app, name="style")
+
+
+@style_app.command("show")
+def style_show(
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+) -> None:
+    """查看当前的写作风格指南。"""
+    deps = _load_deps(project)
+    text = deps.outline.read_style()
+    if not text:
+        console.print(
+            "[yellow]尚无风格指南。[/yellow]编辑 outline/style.md，"
+            "或运行 [bold]rimbook style generate[/bold] 从已写章节反推。"
+        )
+        return
+    console.print(Panel(text, title="写作风格指南"))
+
+
+@style_app.command("generate")
+def style_generate(
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+    chapters: int = typer.Option(3, "--chapters", "-n", help="取最近几章正文作为样本"),
+) -> None:
+    """从已写章节反推写作风格指南（会覆盖 outline/style.md）。"""
+    deps = _load_deps(project)
+    recent = deps.window.recent(chapters, before=10**9)
+    if not recent:
+        console.print("[red]尚无已写章节，无法反推风格。[/red]请先手动编辑 outline/style.md。")
+        raise typer.Exit(code=1)
+    samples = "\n\n".join(
+        f"--- 第 {ch.number} 章节选 ---\n{ch.text[:3000]}" for ch in recent
+    )
+    console.print(f"[cyan]正在从 {len(recent)} 章样本提炼风格指南…[/cyan]")
+    messages = deps.llm.as_chat(
+        system=deps.prompts.style_generate_system,
+        user=deps.prompts.style_generate_user.format(
+            title=deps.config.title, samples=samples,
+        ),
+    )
+    with deps.trace.begin("style", project=deps.project_dir.name) as t:
+        result = deps.llm.generate(messages, temperature=0.3)
+        t.record(messages, result)
+    text = result.content.strip()
+    deps.outline.write_style(text)
+    console.print(Panel(text, title="写作风格指南"))
+    console.print(f"[green]已保存至[/green] {deps.paths.style_file}")
+
+
+recap_app = typer.Typer(help="维护分层记忆（卷情节回顾 / 全书至今故事线）。")
+app.add_typer(recap_app, name="recap")
+
+
+@recap_app.command("volume")
+def recap_volume(
+    number: int = typer.Argument(..., help="卷号"),
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+) -> None:
+    """（重新）生成一卷的实际剧情回顾。"""
+    deps = _load_deps(project)
+    console.print(f"[cyan]正在生成第 {number} 卷情节回顾…[/cyan]")
+    try:
+        recap = deps.summarizer.summarize_volume(number)
+    except FileNotFoundError as exc:
+        console.print(f"[red]错误：[/red]{exc}")
+        raise typer.Exit(code=1)
+    if not recap:
+        console.print("[yellow]该卷尚无带摘要的章节，未生成回顾。[/yellow]")
+        return
+    console.print(Panel(recap, title=f"第 {number} 卷情节回顾"))
+
+
+@recap_app.command("story")
+def recap_story(
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+    upto: Optional[int] = typer.Option(None, "--upto", help="截至章号（默认最新章）"),
+) -> None:
+    """（重新）生成滚动的「全书至今」故事线。"""
+    deps = _load_deps(project)
+    last = upto if upto is not None else deps.outline.last_chapter_number()
+    if last <= 0:
+        console.print("[yellow]尚无章节。[/yellow]")
+        return
+    console.print(f"[cyan]正在更新全书至今故事线（截至第 {last} 章）…[/cyan]")
+    text = deps.summarizer.update_story_so_far(last)
+    if not text:
+        console.print("[yellow]无新增章节摘要，故事线未变化。[/yellow]")
+        return
+    console.print(Panel(text, title=f"全书至今（截至第 {last} 章）"))
+    console.print(f"[green]已保存至[/green] {deps.paths.story_so_far_file}")
+
+
+threads_app = typer.Typer(help="查看情节线索账本（伏笔/悬念/承诺）。")
+app.add_typer(threads_app, name="threads")
+
+
+@threads_app.command("ls")
+def threads_ls(
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+    all: bool = typer.Option(False, "--all", "-a", help="包含已回收的线索"),
+) -> None:
+    """列出情节线索。"""
+    deps = _load_deps(project)
+    items = deps.threads.all() if all else deps.threads.open_threads()
+    if not items:
+        console.print("[dim]账本为空（线索在写作后自动抽取，或手动编辑 state/threads.yaml）。[/dim]")
+        return
+    table = Table(title="情节线索账本")
+    table.add_column("ID", style="dim")
+    table.add_column("类型", style="cyan")
+    table.add_column("状态")
+    table.add_column("埋设章", justify="right")
+    table.add_column("预计回收", justify="right")
+    table.add_column("描述")
+    type_labels = {"foreshadow": "伏笔", "suspense": "悬念", "promise": "承诺"}
+    status_style = {"open": "yellow", "progressed": "cyan", "resolved": "green"}
+    for t in items:
+        table.add_row(
+            t.id,
+            type_labels.get(t.type, t.type),
+            f"[{status_style.get(t.status, 'white')}]{t.status}[/]",
+            str(t.planted_chapter),
+            str(t.expected_resolve_chapter or "-"),
+            t.description,
+        )
+    console.print(table)
+
+
+@app.command()
+def review(
+    project: Optional[Path] = typer.Option(None, "--project", "-p"),
+    volume: Optional[int] = typer.Option(None, "--volume", "-v", help="审阅某一卷"),
+    from_chapter: Optional[int] = typer.Option(None, "--from", help="起始章号"),
+    to_chapter: Optional[int] = typer.Option(None, "--to", help="结束章号"),
+) -> None:
+    """宏观编辑审阅：通读多章，报告节奏/重复桥段/角色声音趋同等问题（只报告不改稿）。"""
+    deps = _load_deps(project)
+    chapters = deps.outline.list_chapters()
+    if volume is not None:
+        chapters = [c for c in chapters if c.volume == volume]
+        scope = f"第 {volume} 卷"
+    else:
+        lo = from_chapter or 1
+        hi = to_chapter or deps.outline.last_chapter_number()
+        chapters = [c for c in chapters if lo <= c.number <= hi]
+        scope = f"第 {lo}-{hi} 章"
+    chapters = [c for c in chapters if c.summary.strip()]
+    if not chapters:
+        console.print("[yellow]范围内没有带摘要的已写章节。[/yellow]")
+        return
+
+    digest_lines = []
+    for c in chapters:
+        extras = []
+        if c.tension:
+            extras.append(f"张力{c.tension}/5")
+        if c.purpose:
+            extras.append(c.purpose)
+        if c.value_shift:
+            extras.append(f"价值转变：{c.value_shift}")
+        extra_str = f"（{'；'.join(extras)}）" if extras else ""
+        digest_lines.append(f"第 {c.number} 章《{c.title}》{extra_str}：{c.summary.strip()}")
+    digest = "\n".join(digest_lines)
+
+    samples: list[str] = []
+    for c in chapters:
+        path = deps.paths.draft_file(c.number)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8").strip()
+        head = text[:400]
+        tail = text[-400:] if len(text) > 800 else ""
+        block = f"--- 第 {c.number} 章开头 ---\n{head}"
+        if tail:
+            block += f"\n--- 第 {c.number} 章结尾 ---\n{tail}"
+        samples.append(block)
+    prose_samples = "\n\n".join(samples) or "（无正文抽样）"
+
+    console.print(f"[cyan]正在宏观审阅 {scope}（{len(chapters)} 章）…[/cyan]")
+    messages = deps.llm.as_chat(
+        system=deps.prompts.macro_review_system,
+        user=deps.prompts.macro_review_user.format(
+            scope=scope, chapter_digest=digest, prose_samples=prose_samples,
+        ),
+    )
+    with deps.trace.begin("macro_review", project=deps.project_dir.name) as t:
+        result = deps.llm.generate(
+            messages,
+            temperature=0.3,
+            model=deps.llm.config.effective_check_model,
+        )
+        t.record(messages, result)
+    report = result.content.strip()
+    console.print(Panel(report, title=f"宏观审阅报告 · {scope}"))
+
+    import time as _time
+    deps.paths.reviews_dir.mkdir(parents=True, exist_ok=True)
+    slug = f"vol{volume}" if volume is not None else f"ch{chapters[0].number}-{chapters[-1].number}"
+    out = deps.paths.reviews_dir / f"{_time.strftime('%Y%m%d-%H%M%S')}-{slug}.md"
+    out.write_text(f"# 宏观审阅报告 · {scope}\n\n{report}\n", encoding="utf-8")
+    console.print(f"[green]报告已保存至[/green] {out}")
 
 
 # ======================================================================

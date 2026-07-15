@@ -118,6 +118,15 @@ def strip_state_section(body: str) -> tuple[str, str | None]:
 # ----------------------------------------------------------------------
 def _make_placeholder(entity_id: str, state: EntityState) -> CodexEntry:
     """Create a minimal codex entry so the entity is queryable & editable."""
+    from .models import Revelation
+
+    revelations: list[Revelation] = []
+    if state.last_seen_chapter > 0:
+        revelations.append(Revelation(
+            chapter=state.last_seen_chapter,
+            content=f"第{state.last_seen_chapter}章首次出现（系统自动建档）：{guess_name(entity_id)}",
+            source="",
+        ))
     return CodexEntry(
         id=entity_id,
         name=guess_name(entity_id),
@@ -126,6 +135,7 @@ def _make_placeholder(entity_id: str, state: EntityState) -> CodexEntry:
         tags=["auto-created"],
         related=list(state.relationships.keys()),
         body=_PLACEHOLDER_BODY,
+        revelations=revelations,
     )
 
 

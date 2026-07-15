@@ -11,9 +11,17 @@ context should I feed the LLM right now?"* It composes four mechanisms:
   a single, token-budgeted context blob.
 """
 
-from .assembler import ContextAssembler, AssembledContext, SectionInfo
+from .assembler import (
+    ContextAssembler,
+    AssembledContext,
+    SectionInfo,
+    serialize_context,
+    save_context_snapshot,
+    load_context_snapshot,
+)
 from .entity_state import EntityStateStore, EntityState
 from .summarizer import Summarizer
+from .threads import PlotThread, ThreadStore, ThreadUpdate
 from .token_budget import estimate_tokens, BudgetAllocator, BudgetedItem
 from .window import SlidingWindow
 
@@ -21,9 +29,15 @@ __all__ = [
     "ContextAssembler",
     "AssembledContext",
     "SectionInfo",
+    "serialize_context",
+    "save_context_snapshot",
+    "load_context_snapshot",
     "EntityStateStore",
     "EntityState",
     "Summarizer",
+    "PlotThread",
+    "ThreadStore",
+    "ThreadUpdate",
     "SlidingWindow",
     "estimate_tokens",
     "BudgetAllocator",

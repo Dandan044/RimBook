@@ -18,11 +18,13 @@ from fastapi import Depends, HTTPException
 from rimbook.config import Config, GenerationConfig, load_config
 from rimbook.codex import CodexEntry, CodexStore
 from rimbook.llm import LLMClient, Prompts, load_prompts
+from rimbook.llm.trace import TraceStore
 from rimbook.memory import (
     ContextAssembler,
     EntityStateStore,
     SlidingWindow,
     Summarizer,
+    ThreadStore,
 )
 from rimbook.outline import OutlineStore
 from rimbook.pipeline import Checker, Planner, Writer, PostWritePipeline
@@ -80,6 +82,22 @@ class ProjectDeps:
         return SlidingWindow(self.paths)
 
     @property
+    def threads(self) -> ThreadStore:
+        return ThreadStore(self.paths)
+
+    @property
+    def retriever(self):
+        """Optional vector retriever, wired in when ``use_vector_retrieval`` is on."""
+        if not self.config.generation.use_vector_retrieval:
+            return None
+        try:
+            from rimbook.retrieval import VectorRetriever
+
+            return VectorRetriever(self.paths, self.llm)
+        except Exception:
+            return None
+
+    @property
     def assembler(self) -> ContextAssembler:
         return ContextAssembler(
             self.paths,
@@ -88,15 +106,27 @@ class ProjectDeps:
             entity_state=self.entity_state,
             window=self.window,
             generation=self.config.generation,
+            retriever=self.retriever,
+            threads=self.threads,
         )
 
     @property
     def summarizer(self) -> Summarizer:
-        return Summarizer(self.llm, self.prompts, self.outline)
+        return Summarizer(
+            self.llm, self.prompts, self.outline,
+            trace=self.trace, project_name=self.project_dir.name,
+        )
 
     @property
     def version_manager(self) -> VersionManager:
         return VersionManager(self.paths.versions_dir, self.project_dir)
+
+    @property
+    def trace(self) -> TraceStore:
+        # Per-project LLM provenance log → <project>/.llm_logs/<date>.jsonl.
+        # Persists the prompt/response/usage for every stage so that problems
+        # (e.g. entity-id fragmentation) can be traced back to the source.
+        return TraceStore(self.project_dir)
 
     @property
     def writer(self) -> Writer:
@@ -111,15 +141,33 @@ class ProjectDeps:
             codex=self.codex,
             generation=self.config.generation,
             version_manager=self.version_manager,
+            trace=self.trace,
+            project_name=self.project_dir.name,
         )
 
     @property
     def planner(self) -> Planner:
-        return Planner(self.llm, self.prompts, self.outline)
+        # NOTE: codex must be passed here, otherwise the planner neither shows
+        # the existing entity registry to the LLM nor normalizes drifted ids
+        # via resolve_entity_ids — which is exactly how the "测试" project ended
+        # up with parallel codex entries (char_lin_yuan vs char_linyuan, etc.).
+        return Planner(
+            self.llm, self.prompts, self.outline,
+            codex=self.codex, threads=self.threads, trace=self.trace,
+            project_name=self.project_dir.name,
+        )
 
     @property
     def checker(self) -> Checker:
-        return Checker(self.paths, llm=self.llm, prompts=self.prompts)
+        return Checker(
+            self.paths,
+            llm=self.llm,
+            prompts=self.prompts,
+            assembler=self.assembler,
+            outline=self.outline,
+            trace=self.trace,
+            project_name=self.project_dir.name,
+        )
 
     @property
     def enricher(self) -> PostWritePipeline:
@@ -131,6 +179,8 @@ class ProjectDeps:
             summarizer=self.summarizer,
             generation=self.config.generation,
             version_manager=self.version_manager,
+            trace=self.trace,
+            project_name=self.project_dir.name,
         )
 
 

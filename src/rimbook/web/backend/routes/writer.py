@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import shutil
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +20,206 @@ from ..sse import sse_done, sse_event, sse_progress
 from ..tasks import task_registry
 
 router = APIRouter(prefix="/api/projects/{project_id}", tags=["writer"])
+
+
+# ---- branch fork for safe re-generation ----
+
+class ForkForRegenReq(BaseModel):
+    branch_name: str = ""
+
+
+@router.post("/chapters/{number}/fork-for-regen")
+def fork_for_regen(
+    project_id: str,
+    number: int,
+    req: ForkForRegenReq,
+    deps: ProjectDeps = Depends(get_project_deps),
+) -> dict:
+    """Create a branch from the last pre-write checkpoint of *number* and switch to it.
+
+    Use this before re-generating a chapter that has subsequent chapters already
+    written — so the codex and entity state don't get contaminated.
+
+    The checkpoint created by ``Writer.write()`` is incremental (only contains
+    the files predicted to change for that chapter).  To produce a workable
+    branch HEAD we must build a *full* snapshot from it: start with a full
+    copy of the current project, overlay the incremental checkpoint (which
+    restores the pre-write codex + state for chapter *number*), then delete
+    drafts for chapters >= *number* (they didn't exist at pre-write time).
+    """
+    vm = deps.version_manager
+    if vm is None:
+        raise HTTPException(400, "版本管理未启用（auto_checkpoint 关闭）")
+
+    # ---- 1. Find the earliest pre-write checkpoint (true baseline) ----
+    # Newest write-chN snapshots may be polluted if a prior regen failed to
+    # delete post-write files; the earliest one is the real pre-first-write state.
+    current_branch = vm.get_current_branch()
+    checkpoints = vm.list_checkpoints(branch=current_branch)
+    prefix = f"write-ch{number}-"
+    matching = [c for c in checkpoints if c.label.startswith(prefix)]
+    last_cp = matching[-1] if matching else None  # list is newest-first → last = oldest
+    if last_cp is None:
+        raise HTTPException(
+            404,
+            f"未找到第 {number} 章的预写快照（write-ch{number}-…）。"
+            f"请确认 auto_checkpoint 已开启且该章曾至少生成过一次。",
+        )
+
+    cp_dir = deps.paths.versions_dir / last_cp.name
+    if not cp_dir.exists():
+        raise HTTPException(404, f"快照目录不存在：{last_cp.name}")
+
+    # ---- 2. Build full snapshot from incremental checkpoint ----
+    branch_name = req.branch_name.strip() if req.branch_name.strip() else f"regen-ch{number}"
+    existing = vm.list_branches()
+    existing_names = {b.name for b in existing}
+    base = branch_name
+    counter = 2
+    while branch_name in existing_names:
+        branch_name = f"{base}-{counter}"
+        counter += 1
+
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    full_name = f"{ts}-{branch_name}"
+    full_dir = deps.paths.versions_dir / full_name
+    # Avoid collision if two forks happen in the same second.
+    _suffix = 1
+    while full_dir.exists():
+        full_name = f"{ts}-{branch_name}-{_suffix}"
+        full_dir = deps.paths.versions_dir / full_name
+        _suffix += 1
+    full_dir.mkdir(parents=True)
+
+    copied = 0
+    cp_file_set: set[str] = set()
+    try:
+        # Build set of checkpoint-relative paths (for project-level cleanup later).
+        for item in cp_dir.rglob("*"):
+            if item.is_file() and item.name != ".manifest":
+                rel = str(item.relative_to(cp_dir)).replace("\\", "/")
+                cp_file_set.add(rel)
+
+        # 2a. Copy ALL current project files (except .versions and drafts >= N).
+        for item in deps.project_dir.iterdir():
+            if item.name == ".versions":
+                continue
+            if item.is_dir():
+                for src_file in item.rglob("*"):
+                    if not src_file.is_file():
+                        continue
+                    rel = str(src_file.relative_to(deps.project_dir)).replace("\\", "/")
+                    # Skip drafts for chapters >= N.
+                    if _is_draft_ge(rel, number):
+                        continue
+                    dest = full_dir / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(str(src_file), str(dest))
+                    copied += 1
+            else:
+                shutil.copy2(str(item), str(full_dir / item.name))
+                copied += 1
+
+        # 2b. Overlay the incremental checkpoint files (pre-write codex + state).
+        overlay = 0
+        for item in cp_dir.rglob("*"):
+            if item.is_file() and item.name != ".manifest":
+                rel = item.relative_to(cp_dir)
+                dest = full_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(str(item), str(dest))
+                overlay += 1
+
+        # 2c. Delete state/codex files that were copied from the live project
+        #     but are absent from the pre-write checkpoint — they were created
+        #     by post-write of chapter >= N and must not leak into the fork.
+        for item in list(full_dir.rglob("*")):
+            if not item.is_file() or item.name == ".manifest":
+                continue
+            rel = str(item.relative_to(full_dir)).replace("\\", "/")
+            if ("/state/" in f"/{rel}" or rel.startswith("state/")
+                    or "/codex/" in f"/{rel}" or rel.startswith("codex/")):
+                if rel not in cp_file_set:
+                    item.unlink()
+                    copied = max(0, copied - 1)
+
+        # 2d. Write manifest.
+        (full_dir / ".manifest").write_text(
+            f"label: {branch_name}\n"
+            f"timestamp: {ts}\n"
+            f"branch: {branch_name}\n"
+            f"parent: {last_cp.name}\n"
+            f"files: {copied}\n"
+            f"overlay: {overlay} files from {last_cp.name}\n",
+            encoding="utf-8",
+        )
+    except Exception:
+        shutil.rmtree(full_dir, ignore_errors=True)
+        raise
+
+    # ---- 3. Create branch from full snapshot & switch ----
+    try:
+        vm.create_branch(branch_name, from_checkpoint=full_name)
+    except ValueError as e:
+        shutil.rmtree(full_dir, ignore_errors=True)
+        raise HTTPException(409, str(e))
+
+    try:
+        saved = vm.switch_branch(branch_name)
+    except ValueError as e:
+        # Attempt clean-up: remove the branch (switching failed).
+        try:
+            branches = vm._read_branches()
+            branches.pop(branch_name, None)
+            vm._write_branches(branches)
+        except Exception:
+            pass
+        raise HTTPException(400, str(e))
+
+    # ---- 4. Clean up post-ChN artefacts from the project ----
+    # restore_checkpoint only copies files — it does not delete stale files
+    # or revert content that was added by chapters >= *number*.  We clean
+    # those up here so the project truly reflects the pre-ChN state.
+
+    cleaned = 0
+
+    # 4a. Remove drafts + write-time context snapshots for chapters >= *number*.
+    project_drafts_dir = deps.paths.draft_file(1).parent
+    if project_drafts_dir.exists():
+        for df in sorted(project_drafts_dir.glob("ch*.md")):
+            m = re.match(r"ch0*(\d+)", df.name)
+            if m and int(m.group(1)) >= number:
+                df.unlink()
+                cleaned += 1
+        for cf in sorted(project_drafts_dir.glob("ch*.context.json")):
+            m = re.match(r"ch0*(\d+)", cf.name)
+            if m and int(m.group(1)) >= number:
+                cf.unlink()
+                cleaned += 1
+
+    # 4b. Strip revelations / contradictions / body fragments from codex
+    #     entries that were added by chapters >= *number*.
+    _clean_codex_post_chapter(deps, number)
+
+    # 4c. Revert entity state knowledge / last_seen from chapters >= *number*.
+    _clean_entity_state_post_chapter(deps, number)
+
+    return {
+        "ok": True,
+        "branch": branch_name,
+        "from_checkpoint": last_cp.name,
+        "from_checkpoint_label": last_cp.label,
+        "previous_branch": current_branch,
+        "saved_checkpoint": saved or None,
+        "hint": (
+            f"已切换到分支「{branch_name}」，"
+            f"项目回退到第 {number} 章生成前的状态"
+            f"（快照共 {copied} 个文件，其中 {overlay} 个来自预写快照覆盖，"
+            f"已清理 {cleaned} 个后续章草稿，"
+            f"已剥离 codex/state 中来自 ≥{number} 章的内容）。"
+            f"原分支「{current_branch}」的存档点：{saved or '无'}。"
+        ),
+    }
 
 
 # ---- request models ----
@@ -53,28 +256,50 @@ def update_draft(number: int, req: DraftUpdate, deps: ProjectDeps = Depends(get_
     return {"ok": True}
 
 
-# ---- context preview ----
+# ---- context (write-time snapshot preferred) ----
 
 @router.get("/context/{number}")
-def preview_context(number: int, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
-    """Preview the assembled context for a chapter (without generating)."""
+def get_chapter_context(
+    number: int,
+    live: bool = False,
+    deps: ProjectDeps = Depends(get_project_deps),
+) -> dict:
+    """Return context for a chapter.
+
+    By default returns the **write-time snapshot** saved when the draft was
+    generated (the exact context fed to the LLM).  Pass ``live=true`` to
+    re-assemble from the current project state instead.
+    """
+    from rimbook.memory.assembler import load_context_snapshot, serialize_context
+
+    if not live:
+        snap = load_context_snapshot(deps.paths, number)
+        if snap is not None:
+            return {
+                "text": snap.get("text", ""),
+                "section_list": snap.get("section_list") or [],
+                "codex_used": snap.get("codex_used") or [],
+                "entity_states": snap.get("entity_states") or [],
+                "recent_chapters": snap.get("recent_chapters") or [],
+                "source": "write",
+            }
+
     ch = deps.outline.read_chapter(number)
     if ch is None:
         raise HTTPException(404, f"Chapter {number} has no outline")
     ctx = deps.assembler.assemble_for_chapter(ch)
-    return {
-        "text": ctx.text,
-        "section_list": _serialize_section_list(ctx.section_list),
-        "codex_used": [e.id for e in ctx.codex_used],
-        "entity_states": [s.entity_id for s in ctx.entity_states_used],
-        "recent_chapters": ctx.recent_chapters,
-    }
+    payload = serialize_context(ctx)
+    payload["source"] = "live"
+    return payload
 
 
 # ---- write (SSE) ----
 
 @router.get("/write/{number}")
-def write_chapter_sse(number: int, deps: ProjectDeps = Depends(get_project_deps)) -> EventSourceResponse:
+def write_chapter_sse(
+    project_id: str, number: int,
+    deps: ProjectDeps = Depends(get_project_deps),
+) -> EventSourceResponse:
     """Generate a chapter with SSE progress streaming."""
 
     async def event_stream():
@@ -197,9 +422,9 @@ def check_chapter(project_id: str, number: int, req: CheckRequest, deps: Project
             max_rounds = deps.config.generation.max_fix_rounds
 
             def apply_fix(text: str, issues_blob: str) -> str:
-                res = deps.writer.revise(number, draft_text=text, instructions=f"请解决以下审校问题：\n{issues_blob}")
-                from pathlib import Path
-                return Path(res.draft_path).read_text(encoding="utf-8").strip()
+                # Minimal-fix path: patch only the problematic passages
+                # instead of re-writing the whole chapter (preserves voice).
+                return deps.writer.apply_minimal_fix(number, text, issues_blob)
 
             report = deps.checker.check_and_fix(number, max_rounds=max_rounds, apply_fix=apply_fix)
         finally:
@@ -304,3 +529,196 @@ def _serialize_section_list(section_list: list) -> list[dict]:
             d["sub_items"] = sec.sub_items
         result.append(d)
     return result
+
+
+def _is_draft_ge(rel_path: str, number: int) -> bool:
+    """Return True if *rel_path* is a draft for chapter >= *number*.
+
+    >>> _is_draft_ge("drafts/ch002.md", 1)
+    True
+    >>> _is_draft_ge("drafts/ch001.md", 2)
+    False
+    >>> _is_draft_ge("codex/characters/foo.md", 1)
+    False
+    """
+    # Normalised separator is "/" from the caller.
+    parts = rel_path.split("/")
+    if len(parts) >= 2 and parts[0] == "drafts":
+        fn = parts[-1]
+        m = re.match(r"ch0*(\d+)", fn)
+        if m:
+            return int(m.group(1)) >= number
+    return False
+
+
+def _clean_codex_post_chapter(deps: ProjectDeps, number: int) -> None:
+    """Strip revelations, contradictions, and body fragments added
+    by chapters >= *number* from every codex entry.
+
+    If a codex entry has NO remaining content (all revelations, contradictions,
+    and body fragments were from chapters >= *number*), delete the file entirely
+    — it was created by chapters that are being rolled back.
+    """
+    import yaml as _yaml
+
+    codex_dir = deps.paths.codex_dir
+    if not codex_dir.exists():
+        return
+    for md_file in codex_dir.rglob("*.md"):
+        if md_file.name.startswith("."):
+            continue
+        try:
+            text = md_file.read_text(encoding="utf-8")
+        except Exception:
+            continue
+        parts = text.split("---\n", 2)
+        if len(parts) < 3:
+            continue
+        front_str = parts[1]
+        body = parts[2]
+
+        try:
+            front = _yaml.safe_load(front_str)
+        except _yaml.YAMLError:
+            continue
+        if not isinstance(front, dict):
+            continue
+
+        modified = False
+
+        # Filter revelations.
+        revs = front.get("revelations") or []
+        kept_revs = [
+            r for r in revs
+            if isinstance(r, dict) and r.get("chapter", 0) < number
+        ]
+        if len(kept_revs) != len(revs):
+            front["revelations"] = kept_revs
+            modified = True
+
+        # Filter contradictions.
+        conts = front.get("contradictions") or []
+        kept_conts = [
+            c for c in conts
+            if isinstance(c, dict) and c.get("chapter", 0) < number
+        ]
+        if len(kept_conts) != len(conts):
+            front["contradictions"] = kept_conts
+            modified = True
+
+        # Strip body fragments tagged with chapter >= N.
+        # Use span-based deletion to avoid str.replace deleting wrong content.
+        if body:
+            import re as _re
+            pattern = _re.compile(
+                r"(\n\n)?🤖\s*第\s*(\d+)\s*章.*?(?=\n\n🤖|\n*$)",
+                _re.DOTALL,
+            )
+            # Collect spans to delete (in reverse order for safe splicing).
+            spans_to_delete: list[tuple[int, int]] = []
+            for m in pattern.finditer(body):
+                if int(m.group(2)) >= number:
+                    spans_to_delete.append((m.start(), m.end()))
+            if spans_to_delete:
+                # Build new body by splicing out the deleted spans.
+                new_body_parts: list[str] = []
+                last_end = 0
+                for start, end in spans_to_delete:
+                    new_body_parts.append(body[last_end:start])
+                    last_end = end
+                new_body_parts.append(body[last_end:])
+                body = "".join(new_body_parts)
+                body = _re.sub(r"\n{3,}", "\n\n", body).strip()
+                modified = True
+
+        # Check if this entry is now empty (all content was from >= N chapters).
+        has_revs = bool(front.get("revelations"))
+        has_conts = bool(front.get("contradictions"))
+        has_body = bool(body and body.strip())
+        if modified and not has_revs and not has_conts and not has_body:
+            # Entire entry was created by chapters >= N; delete the file.
+            try:
+                md_file.unlink()
+            except Exception:
+                pass
+            continue
+
+        if modified:
+            new_front = _yaml.dump(front, allow_unicode=True, sort_keys=False).strip()
+            md_file.write_text(
+                f"---\n{new_front}\n---\n{body}\n",
+                encoding="utf-8",
+            )
+
+
+def _clean_entity_state_post_chapter(deps: ProjectDeps, number: int) -> None:
+    """Strip knowledge / possessions added by chapters >= *number*
+    and revert last_seen_chapter.
+
+    If an entity state file becomes empty (no knowledge, no possessions, and
+    last_seen_chapter was >= N), delete the file entirely — this entity was
+    first introduced in a chapter that is being rolled back.
+    """
+    import yaml as _yaml
+
+    state_dir = deps.paths.state_dir / "entities"
+    if not state_dir.exists():
+        return
+    for yf in state_dir.glob("*.yaml"):
+        if yf.name.startswith("."):
+            continue
+        try:
+            state = _yaml.safe_load(yf.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(state, dict):
+            continue
+        modified = False
+
+        # Filter knowledge.
+        knowledge = state.get("knowledge") or []
+        if isinstance(knowledge, list):
+            filtered = [
+                k for k in knowledge
+                if isinstance(k, dict) and k.get("since_chapter", 0) < number
+            ]
+            if len(filtered) != len(knowledge):
+                state["knowledge"] = filtered
+                modified = True
+
+        # Filter possessions.
+        possessions = state.get("possessions") or []
+        if isinstance(possessions, list):
+            filtered = [
+                p for p in possessions
+                if isinstance(p, dict) and p.get("since_chapter", 0) < number
+            ]
+            if len(filtered) != len(possessions):
+                state["possessions"] = filtered
+                modified = True
+
+        # Revert last_seen_chapter.
+        lsc = state.get("last_seen_chapter", 0)
+        if isinstance(lsc, int) and lsc >= number:
+            state["last_seen_chapter"] = max(0, number - 1)
+            modified = True
+
+        if modified:
+            # Check if state is now empty (entity was created in a chapter >= N).
+            has_knowledge = bool(state.get("knowledge"))
+            has_possessions = bool(state.get("possessions"))
+            lsc_now = state.get("last_seen_chapter", 0)
+            if not has_knowledge and not has_possessions and (
+                not isinstance(lsc_now, int) or lsc_now == 0
+            ):
+                # Entity state is empty; delete the file.
+                try:
+                    yf.unlink()
+                except Exception:
+                    pass
+                continue
+
+            yf.write_text(
+                _yaml.dump(state, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )

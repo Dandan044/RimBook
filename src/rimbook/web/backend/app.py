@@ -15,7 +15,7 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 
-from .routes import codex, outline, projects, prompts, server, status, versioning, writer
+from .routes import codex, narrative, outline, projects, prompts, server, status, versioning, writer
 
 app = FastAPI(
     title="RimBook",
@@ -43,6 +43,7 @@ app.include_router(status.router)
 app.include_router(codex.router)
 app.include_router(outline.router)
 app.include_router(writer.router)
+app.include_router(narrative.router)
 app.include_router(prompts.router)
 app.include_router(prompts.preview_router)
 app.include_router(server.router)
@@ -128,8 +129,9 @@ def update_global_config(req: GlobalConfigUpdate) -> dict:
                 continue
             llm[key] = val
 
-    # reasoning_effort: allow setting to None explicitly (empty string → None)
-    if req.reasoning_effort is not None:
+    # reasoning_effort: distinguish "not sent" vs "explicitly null/empty" (turn off).
+    # Pydantic maps both omitted and JSON-null to None; use model_fields_set.
+    if "reasoning_effort" in req.model_fields_set:
         llm["reasoning_effort"] = req.reasoning_effort or None
 
     if req.embed_base_url is not None:

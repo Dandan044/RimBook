@@ -47,6 +47,40 @@ class OutlineStore:
         return path
 
     # ==================================================================
+    # Style bible (voice card)
+    # ==================================================================
+    def read_style(self) -> str:
+        path = self.paths.style_file
+        if not path.exists():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
+
+    def write_style(self, text: str) -> Path:
+        path = self.paths.style_file
+        atomic_write(path, text.strip() + "\n")
+        return path
+
+    # ==================================================================
+    # Story-so-far (rolling whole-book recap)
+    # ==================================================================
+    def read_story_so_far(self) -> tuple[str, int]:
+        """Return ``(text, upto_chapter)`` of the rolling story-so-far recap."""
+        path = self.paths.story_so_far_file
+        if not path.exists():
+            return "", 0
+        with path.open("r", encoding="utf-8") as fh:
+            post = frontmatter.load(fh)
+        upto = int((post.metadata or {}).get("upto_chapter") or 0)
+        return post.content.strip(), upto
+
+    def write_story_so_far(self, text: str, upto_chapter: int) -> Path:
+        path = self.paths.story_so_far_file
+        post = frontmatter.Post(text.strip())
+        post.metadata = {"upto_chapter": upto_chapter}
+        atomic_write(path, frontmatter.dumps(post, sort_keys=False))
+        return path
+
+    # ==================================================================
     # Volumes
     # ==================================================================
     def write_volume(self, vol: VolumeOutline) -> Path:
@@ -57,6 +91,7 @@ class OutlineStore:
             "title": vol.title,
             "chapters": vol.chapters,
             "ending": vol.ending,
+            "recap": vol.recap,
         }
         atomic_write(path, frontmatter.dumps(post, sort_keys=False))
         return path
@@ -93,6 +128,12 @@ class OutlineStore:
             "tags": ch.tags,
             "beats": [b.model_dump() for b in ch.beats],
             "summary": ch.summary,
+            "purpose": ch.purpose,
+            "value_shift": ch.value_shift,
+            "tension": ch.tension,
+            "hook": ch.hook,
+            "story_date": ch.story_date,
+            "elapsed": ch.elapsed,
         }
         atomic_write(path, frontmatter.dumps(post, sort_keys=False))
         return path
@@ -140,6 +181,7 @@ class OutlineStore:
             arc=post.content.strip(),
             chapters=list(meta.get("chapters") or []),
             ending=str(meta.get("ending", "")),
+            recap=str(meta.get("recap", "") or ""),
         )
 
     def _parse_chapter(self, path: Path) -> ChapterOutline | None:
@@ -157,6 +199,12 @@ class OutlineStore:
             beats=beats,
             notes=post.content.strip(),
             summary=str(meta.get("summary", "")),
+            purpose=str(meta.get("purpose", "") or ""),
+            value_shift=str(meta.get("value_shift", "") or ""),
+            tension=_safe_tension(meta.get("tension")),
+            hook=str(meta.get("hook", "") or ""),
+            story_date=str(meta.get("story_date", "") or ""),
+            elapsed=str(meta.get("elapsed", "") or ""),
         )
 
 
@@ -176,3 +224,12 @@ def _clean_beat(b: Any) -> dict[str, Any]:
         return {"goal": str(b)}
     allowed = {"goal", "conflict", "outcome", "entities"}
     return {k: v for k, v in b.items() if k in allowed}
+
+
+def _safe_tension(v: Any) -> int:
+    """Coerce the tension field to an int in [0, 5]."""
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 0
+    return min(max(n, 0), 5)

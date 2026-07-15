@@ -10,11 +10,25 @@
         <el-select v-model="chapterNum" placeholder="选择章节" class="chapter-select" @change="loadChapter">
           <el-option v-for="c in chapterList" :key="c.number" :label="`第${c.number}章 ${c.title}`" :value="c.number" />
         </el-select>
+        <el-tag v-if="currentBranch !== 'main'" type="warning" effect="dark" size="small" class="branch-tag">
+          <el-icon><Share /></el-icon>
+          {{ currentBranch }}
+        </el-tag>
+        <el-tag v-else type="info" effect="plain" size="small" class="branch-tag">
+          <el-icon><Share /></el-icon>
+          main
+        </el-tag>
       </div>
       <div class="topbar-right">
         <div class="action-group">
-          <el-button type="primary" @click="doWrite" :loading="writing" :disabled="!chapterNum">
-            <el-icon><VideoPlay /></el-icon> 生成正文
+          <el-button
+            :type="draftText ? 'warning' : 'primary'"
+            @click="doWrite"
+            :loading="writing"
+            :disabled="!chapterNum"
+          >
+            <el-icon><VideoPlay /></el-icon>
+            {{ draftText ? '重新生成正文' : '生成正文' }}
           </el-button>
           <el-button @click="doCheck" :loading="checking" :disabled="!draftText">
             <el-icon><CircleCheck /></el-icon> 校验
@@ -42,10 +56,14 @@
     <el-collapse v-model="contextCollapsed" class="context-collapse-mobile">
       <el-collapse-item title="上下文" name="context">
         <div class="context-collapse-actions">
-          <el-button size="small" @click="loadContext" :disabled="!chapterNum">预览</el-button>
+          <el-button size="small" @click="loadContext(false)" :disabled="!chapterNum">加载写时上下文</el-button>
+          <el-button size="small" text @click="loadContext(true)" :disabled="!chapterNum">实时预览</el-button>
+        </div>
+        <div v-if="contextSource" class="context-source-badge" :class="contextSource">
+          {{ contextSource === 'write' ? '本章生成时传入' : '实时组装（非写时）' }}
         </div>
         <div v-if="contextText" class="context-text">{{ contextText }}</div>
-        <div v-else class="empty-hint">点击「预览」查看投喂给 LLM 的上下文</div>
+        <div v-else class="empty-hint">有正文后将自动显示生成时的上下文；也可点「实时预览」</div>
       </el-collapse-item>
     </el-collapse>
 
@@ -53,21 +71,42 @@
       <!-- Left: context panel -->
       <div class="panel-context" :class="{ 'is-expanded': expandedPanel === 'context' }">
         <div class="panel-card context-card">
-          <div class="panel-header">
-            <span class="panel-title">
-              <el-icon><View /></el-icon> 上下文
-            </span>
-            <div class="panel-header-actions">
-              <el-button size="small" text @click="loadContext" :disabled="!chapterNum">
-                <el-icon><Refresh /></el-icon> 预览
-              </el-button>
-              <el-button size="small" text @click="contextViewMode = contextViewMode === 'structured' ? 'raw' : 'structured'" :disabled="!contextText">
-                {{ contextViewMode === 'structured' ? '原始' : '结构化' }}
-              </el-button>
+          <div class="panel-header context-header">
+            <div class="context-header-top">
+              <span class="panel-title">
+                <el-icon><View /></el-icon> 上下文
+                <el-tag v-if="contextSource" size="small" :type="contextSource === 'write' ? 'success' : 'warning'" effect="plain" class="context-source-tag">
+                  {{ contextSource === 'write' ? '写时' : '实时' }}
+                </el-tag>
+              </span>
               <button class="expand-btn" @click="toggleExpand('context')" :title="expandedPanel === 'context' ? '收起' : '展开'">
                 <svg v-if="expandedPanel === 'context'" viewBox="0 0 16 16" fill="none" class="expand-icon"><path d="M4 1h11v11M1 4l11-3M12 15H1V4M15 12L4 15" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 <svg v-else viewBox="0 0 16 16" fill="none" class="expand-icon"><path d="M1 5V1h4M15 11v4h-4M1 1l5 5M15 15l-5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
+            </div>
+            <div class="context-toolbar">
+              <button
+                type="button"
+                class="ctx-tool-btn"
+                :class="{ active: contextSource === 'write' }"
+                :disabled="!chapterNum"
+                title="加载本章生成时传入的上下文"
+                @click="loadContext(false)"
+              >写时</button>
+              <button
+                type="button"
+                class="ctx-tool-btn"
+                :class="{ active: contextSource === 'live' }"
+                :disabled="!chapterNum"
+                title="按当前项目状态重新组装"
+                @click="loadContext(true)"
+              >实时</button>
+              <button
+                type="button"
+                class="ctx-tool-btn"
+                :disabled="!contextText"
+                @click="contextViewMode = contextViewMode === 'structured' ? 'raw' : 'structured'"
+              >{{ contextViewMode === 'structured' ? '原始' : '结构化' }}</button>
             </div>
           </div>
           <div class="panel-content">
@@ -166,7 +205,8 @@
             <div v-else-if="contextText" class="context-text">{{ contextText }}</div>
             <div v-else class="panel-empty">
               <el-icon :size="28" class="panel-empty-icon"><View /></el-icon>
-              <span>点击「预览」查看上下文</span>
+              <span>有正文后自动显示生成时上下文</span>
+              <span class="empty-sub">或点「写时 / 实时」手动加载</span>
             </div>
           </div>
         </div>
@@ -197,7 +237,6 @@
             <el-input
               v-model="draftText"
               type="textarea"
-              :rows="28"
               placeholder="章节正文将显示在这里…"
               class="draft-editor"
             />
@@ -363,10 +402,10 @@ import { useProjectStore } from '../stores/project'
 import {
   listChapters, getDraft, updateDraft, previewContext,
   checkChapter, reviseChapter, regenerateSummary,
-  writeChapterSSE, getWriteStatus,
+  writeChapterSSE, getWriteStatus, forkForRegen, listBranches,
   type ChapterOutline, type CheckIssue,
 } from '../api'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { marked } from 'marked'
 
 const store = useProjectStore()
@@ -374,6 +413,7 @@ const chapterNum = ref<number | null>(null)
 const chapterList = ref<ChapterOutline[]>([])
 const draftText = ref('')
 const contextText = ref('')
+const contextSource = ref<'write' | 'live' | ''>('')
 const contextViewMode = ref<'raw' | 'structured'>('structured')
 const collapsedSections = ref(new Set<number>())
 // Structured sections from API (data-driven, not parsed)
@@ -399,6 +439,7 @@ const checking = ref(false)
 const summarizing = ref(false)
 const revising = ref(false)
 const progressMsg = ref('')
+const currentBranch = ref('main')
 
 const showRevise = ref(false)
 const reviseInstructions = ref('')
@@ -481,29 +522,131 @@ async function fetchChapterList() {
   }
 }
 
+async function fetchBranchInfo() {
+  if (!store.currentId) return
+  try {
+    const r = await listBranches(store.currentId)
+    currentBranch.value = r.current || 'main'
+  } catch { /* ignore */ }
+}
+
 async function loadChapter() {
   if (!store.currentId || !chapterNum.value) return
   checkReport.value = null
   contextText.value = ''
+  contextSource.value = ''
+  contextSections.value = []
   const [draft, ch] = await Promise.all([
     getDraft(store.currentId, chapterNum.value),
     listChapters(store.currentId),
   ])
   draftText.value = draft.text || ''
   currentBeat.value = ch.find(c => c.number === chapterNum.value) || null
+  // Prefer write-time context when a draft exists.
+  if (draftText.value) {
+    await loadContext(false, true)
+  }
 }
 
-async function loadContext() {
+async function loadContext(live: boolean = false, quiet: boolean = false) {
   if (!store.currentId || !chapterNum.value) return
   try {
-    const r = await previewContext(store.currentId, chapterNum.value) as any
-    contextText.value = r.text
+    const r = await previewContext(store.currentId, chapterNum.value, live) as any
+    contextText.value = r.text || ''
     contextSections.value = r.section_list || []
-  } catch (e: any) { ElMessage.error('预览失败') }
+    contextSource.value = (r.source === 'write' || r.source === 'live') ? r.source : (live ? 'live' : 'write')
+    if (!quiet && !live && r.source === 'live') {
+      // No snapshot yet (chapter written before this feature).
+      ElMessage.info('本章尚无写时上下文快照，已显示实时组装结果。重新生成正文后将自动保存。')
+    }
+  } catch (e: any) {
+    if (!quiet) ElMessage.error(live ? '实时预览失败' : '加载写时上下文失败')
+  }
 }
 
 async function doWrite() {
   if (!store.currentId || !chapterNum.value) return
+
+  // If draft already exists, confirm before overwriting.
+  if (draftText.value) {
+    // Check whether subsequent chapters also have drafts.
+    let hasSubsequent = false
+    try {
+      const allChapters = await listChapters(store.currentId)
+      hasSubsequent = allChapters.some(c => c.number > chapterNum.value! && c.has_draft)
+    } catch {}
+
+    if (hasSubsequent) {
+      // ── Branch fork path ──
+      try {
+        await ElMessageBox.confirm(
+          `第 ${chapterNum.value} 章之后还有已生成的章节。` +
+          `重新生成将影响后续章节的一致性。\n\n` +
+          `推荐在新分支上重新生成：系统会从第 ${chapterNum.value} 章生成前的快照创建分支，` +
+          `切换到该分支后，所有后续章需要在新分支上重新生成。` +
+          `原分支不受影响。`,
+          '重新生成',
+          {
+            type: 'warning',
+            confirmButtonText: '在新分支重新生成',
+            cancelButtonText: '取消',
+            dangerouslyUseHTMLString: false,
+          },
+        )
+      } catch {
+        return  // user cancelled
+      }
+
+      // Fork branch from pre-write checkpoint.
+      let branchName = ''
+      try {
+        writing.value = true
+        progressMsg.value = '正在创建分支…'
+        const r = await forkForRegen(store.currentId, chapterNum.value)
+        branchName = r.branch
+        ElMessage.success({
+          message: r.hint,
+          duration: 5000,
+        })
+      } catch (e: any) {
+        writing.value = false
+        progressMsg.value = ''
+        ElMessage.error(e?.response?.data?.detail || e?.message || '分支创建失败')
+        return
+      }
+      // Reload project state (chapter list, draft, etc.) after branch switch.
+      progressMsg.value = '正在刷新…'
+      try { await store.fetchStatus() } catch {}
+      await fetchBranchInfo()
+      chapterList.value = await listChapters(store.currentId)
+      // The draft for this chapter no longer exists on the new branch.
+      draftText.value = ''
+      contextText.value = ''
+      contextSections.value = []
+      contextSource.value = ''
+      checkReport.value = null
+      enrichmentResult.value = null
+      progressMsg.value = ''
+      // Fall through to the normal write flow below (no draft guard triggers).
+    } else {
+      // ── Simple re-generate path (no subsequent chapters) ──
+      try {
+        await ElMessageBox.confirm(
+          `第 ${chapterNum.value} 章已有草稿。重新生成将覆盖现有正文，并自动回滚设定集和实体状态到本次生成前的版本。`,
+          '重新生成',
+          {
+            type: 'warning',
+            confirmButtonText: '确认重新生成',
+            cancelButtonText: '取消',
+          },
+        )
+      } catch {
+        return  // user cancelled
+      }
+    }
+  }
+
+  // --- Normal write flow (SSE) ---
   writing.value = true
   progressMsg.value = '连接中…'
   checkReport.value = null
@@ -520,9 +663,13 @@ async function doWrite() {
         progress: msg,
       }
     },
-    onContext: (data) => { contextText.value = (data as any).preview || '' },
-    onDraft: async (data) => {
-      const d = data as any
+    onContext: (data) => {
+      // Transient preview during generation; full write-time snapshot loads on done.
+      contextText.value = (data as any).preview || ''
+      contextSections.value = []
+      contextSource.value = 'live'
+    },
+    onDraft: async (_data) => {
       draftText.value = '' // will reload below
       progressMsg.value = '草稿已生成'
     },
@@ -534,6 +681,8 @@ async function doWrite() {
     },
     onError: (msg) => {
       ElMessage.error(msg)
+      writing.value = false
+      progressMsg.value = ''
       store.stopWriteTracking(chapterNum.value!)
     },
     onDone: async () => {
@@ -584,7 +733,10 @@ async function saveDraft() {
   ElMessage.success('草稿已保存')
 }
 
-onMounted(fetchChapterList)
+onMounted(() => {
+  fetchChapterList()
+  fetchBranchInfo()
+})
 
 // Check for active writes when entering this page (may have navigated away and back).
 async function checkActiveWrite() {
@@ -673,6 +825,14 @@ onMounted(() => {
   min-width: 180px;
 }
 
+.branch-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .topbar-right {
   display: flex;
   align-items: center;
@@ -737,6 +897,8 @@ onMounted(() => {
 .panel-draft {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
   transition: flex 0.35s cubic-bezier(0.4, 0, 0.2, 1),
               max-width 0.35s cubic-bezier(0.4, 0, 0.2, 1),
               opacity 0.25s ease;
@@ -840,6 +1002,76 @@ onMounted(() => {
   border-bottom: 1px solid var(--rb-border-light);
   flex-shrink: 0;
   background: var(--rb-bg-subtle);
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Context panel: two-row header so expand never gets squeezed out */
+.context-header {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.context-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.context-header-top .panel-title {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.context-header-top .expand-btn {
+  flex-shrink: 0;
+}
+
+.context-source-tag {
+  margin-left: 4px;
+  flex-shrink: 0;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.context-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ctx-tool-btn {
+  appearance: none;
+  border: 1px solid var(--rb-border-light);
+  background: var(--rb-bg-surface);
+  color: var(--rb-text-secondary);
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ctx-tool-btn:hover:not(:disabled) {
+  border-color: var(--rb-primary);
+  color: var(--rb-primary);
+}
+
+.ctx-tool-btn.active {
+  background: var(--rb-primary-bg, rgba(99, 102, 241, 0.1));
+  border-color: var(--rb-primary);
+  color: var(--rb-primary);
+  font-weight: 600;
+}
+
+.ctx-tool-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .panel-title {
@@ -944,6 +1176,28 @@ onMounted(() => {
   text-align: center;
 }
 
+.panel-empty .empty-sub {
+  font-size: 12px;
+  color: var(--rb-text-subtle);
+}
+
+.context-source-badge {
+  display: inline-block;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-bottom: 8px;
+}
+.context-source-badge.write {
+  color: var(--rb-success, #059669);
+  background: rgba(16, 185, 129, 0.1);
+}
+.context-source-badge.live {
+  color: var(--rb-warning, #d97706);
+  background: rgba(245, 158, 11, 0.12);
+}
+
 .panel-empty-icon {
   color: var(--rb-text-subtle);
 }
@@ -961,16 +1215,40 @@ onMounted(() => {
   letter-spacing: -0.005em;
 }
 
-/* Draft panel */
+/* Draft panel — single scrollbar on the textarea only */
 .draft-card {
   height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .draft-content {
   padding: 0 !important;
+  overflow: hidden; /* prevent outer scrollbar; textarea scrolls */
+  display: flex;
+  flex-direction: column;
+}
+
+.draft-editor {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.draft-editor :deep(.el-textarea) {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .draft-editor :deep(textarea) {
+  flex: 1;
+  height: 100% !important;
+  min-height: 0 !important;
   font-size: var(--draft-font-size, 16px);
   line-height: 1.9;
   font-family: var(--rb-font);
@@ -978,12 +1256,12 @@ onMounted(() => {
   box-shadow: none !important;
   border-radius: 0 !important;
   padding: 20px 24px;
-  min-height: 100%;
   resize: none;
   background: transparent;
   color: var(--rb-text-primary);
   letter-spacing: 0.01em;
   transition: font-size 0.2s ease;
+  overflow-y: auto;
 }
 
 .draft-editor :deep(textarea:focus) {

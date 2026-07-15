@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm import LLMClient, Prompts
+from ..llm.trace import NULL_TRACE, TraceStore
+from ..memory import ContextAssembler
+from ..outline import OutlineStore
 from ..project import ProjectPaths
 
 __all__ = ["Issue", "CheckReport", "Checker"]
@@ -56,10 +59,24 @@ class CheckReport:
 class Checker:
     """Audit chapter prose for consistency and optionally auto-fix."""
 
-    def __init__(self, paths: ProjectPaths, *, llm: LLMClient, prompts: Prompts) -> None:
+    def __init__(
+        self,
+        paths: ProjectPaths,
+        *,
+        llm: LLMClient,
+        prompts: Prompts,
+        assembler: ContextAssembler | None = None,
+        outline: OutlineStore | None = None,
+        trace: TraceStore | None = None,
+        project_name: str = "",
+    ) -> None:
         self.paths = paths
         self.llm = llm
         self.prompts = prompts
+        self.assembler = assembler
+        self.outline = outline
+        self.trace = trace if trace is not None else NULL_TRACE
+        self.project_name = project_name
 
     def check(self, number: int, draft_text: str | None = None) -> CheckReport:
         """Audit a chapter's draft and return a :class:`CheckReport`."""
@@ -113,13 +130,22 @@ class Checker:
     # Internals
     # ------------------------------------------------------------------
     def _run_one_pass(self, report: CheckReport, text: str) -> None:
-        user = self.prompts.checker_user.format(chapter_text=text)
-        messages = self.llm.as_chat(system=self.prompts.checker_system, user=user)
-        data = self.llm.generate_json(
-            messages,
-            model=self.llm.config.effective_check_model,
-            temperature=0.0,
+        context = self._build_reference_context(report.chapter_number)
+        user = self.prompts.checker_user.format(
+            context=context or "（本次审校未提供参照材料，请基于正文内部自洽性检查）",
+            chapter_text=text,
         )
+        messages = self.llm.as_chat(system=self.prompts.checker_system, user=user)
+        with self.trace.begin(
+            "checker", project=self.project_name, chapter=report.chapter_number,
+            round=report.rounds,
+        ) as t:
+            data = self.llm.generate_json(
+                messages,
+                model=self.llm.config.effective_check_model,
+                temperature=0.0,
+            )
+            t.record(messages, data, model=self.llm.config.effective_check_model)
         if "usage" in data and isinstance(data["usage"], dict):
             report.usage.append(data["usage"])  # type: ignore[arg-type]
         report.overall = str(data.get("overall", "需修订")) or "需修订"
@@ -138,6 +164,27 @@ class Checker:
                 )
             )
         report.issues = issues
+
+    def _build_reference_context(self, chapter_number: int) -> str:
+        """Assemble the reference material the checker audits against.
+
+        Uses the shared :class:`ContextAssembler` in ``check`` mode (codex,
+        entity states, prior summaries, open threads, and the chapter beat —
+        but no style bible or full recent prose). Returns ``""`` when the
+        assembler/outline aren't wired or the chapter has no outline.
+        """
+        if self.assembler is None or self.outline is None:
+            return ""
+        try:
+            chapter = self.outline.read_chapter(chapter_number)
+        except Exception:
+            return ""
+        if chapter is None:
+            return ""
+        try:
+            return self.assembler.assemble_for_chapter(chapter, mode="check").text
+        except Exception:
+            return ""
 
     @staticmethod
     def _format_issues_for_fix(issues: list[Issue]) -> str:

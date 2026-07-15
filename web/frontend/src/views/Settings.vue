@@ -65,7 +65,7 @@
                     </el-form-item>
                     <el-form-item label="推理模式">
                       <el-select v-model="globalConfig.llm.reasoning_effort" placeholder="关闭" clearable style="width: 200px">
-                        <el-option label="关闭" :value="null" />
+                        <el-option label="关闭" value="" />
                         <el-option label="低" value="low" />
                         <el-option label="中" value="medium" />
                         <el-option label="高" value="high" />
@@ -357,7 +357,8 @@ interface GlobalConfigData {
     api_key: string
     model: string
     check_model: string | null
-    reasoning_effort: string | null
+    /** '' = off; Element Plus cannot reliably bind null as option value */
+    reasoning_effort: string
     embedding: { base_url: string | null; api_key: string; model: string }
   }
 }
@@ -435,7 +436,8 @@ async function loadGlobalConfig() {
         api_key: data.llm?.api_key || '',
         model: data.llm?.model || '',
         check_model: data.llm?.check_model || null,
-        reasoning_effort: data.llm?.reasoning_effort || null,
+        // Normalize null → '' so el-select can bind (null option values are broken in Element Plus)
+        reasoning_effort: data.llm?.reasoning_effort || '',
         embedding: {
           base_url: data.llm?.embedding?.base_url || null,
           api_key: data.llm?.embedding?.api_key || '',
@@ -457,7 +459,8 @@ async function saveGlobalConfig() {
       base_url: c.llm.base_url,
       model: c.llm.model,
       check_model: c.llm.check_model,
-      reasoning_effort: c.llm.reasoning_effort,
+      // Always send the field: '' means explicitly turn off (backend maps to null)
+      reasoning_effort: c.llm.reasoning_effort || null,
       embed_base_url: c.llm.embedding.base_url,
       embed_model: c.llm.embedding.model,
     }
@@ -469,6 +472,7 @@ async function saveGlobalConfig() {
       payload.embed_api_key = c.llm.embedding.api_key
     }
     await updateGlobalConfig(payload)
+    await loadGlobalConfig()
     ElMessage.success('全局配置已保存')
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '保存失败')
@@ -594,12 +598,13 @@ async function doCreateCheckpoint() {
 
 async function doCreateBranch() {
   if (!selectedId.value || !newBranchName.value.trim()) return
+  const name = newBranchName.value.trim()
   try {
-    await createBranch(selectedId.value, { name: newBranchName.value.trim(), from_checkpoint: newBranchFromCp.value })
+    await createBranch(selectedId.value, { name, from_checkpoint: newBranchFromCp.value })
     showNewBranchDialog.value = false
     newBranchName.value = ''
     newBranchFromCp.value = null
-    ElMessage.success(`分支 '${newBranchName.value.trim()}' 已创建`)
+    ElMessage.success(`分支 '${name}' 已创建`)
     await loadVersionData()
   } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '创建失败') }
 }

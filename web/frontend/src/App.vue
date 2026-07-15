@@ -33,6 +33,10 @@
           <el-icon><EditPen /></el-icon>
           <template #title>写作</template>
         </el-menu-item>
+        <el-menu-item index="/narrative">
+          <el-icon><Compass /></el-icon>
+          <template #title>叙事管理</template>
+        </el-menu-item>
         <el-menu-item index="/workflow">
           <el-icon><Connection /></el-icon>
           <template #title>工作流</template>

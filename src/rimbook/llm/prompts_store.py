@@ -108,8 +108,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "章节 beat · 系统",
         "zh_module": "章节 beat",
-        "description": "规划章节 beat 时的系统提示，定义 entities id 复用规则、"
-        "JSON 输出格式（title/entities/tags/notes/beats[]）。",
+        "description": "规划章节 beat 时的系统提示，定义节奏字段（purpose/value_shift/"
+        "tension/hook/story_date/elapsed）、entities id 复用规则与 JSON 输出格式。",
         "placeholders": [],
         "in_use": True,
     },
@@ -118,12 +118,13 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "user",
         "zh_name": "章节 beat · 用户",
         "zh_module": "章节 beat",
-        "description": "规划章节 beat 的用户消息，注入梗概/卷大纲/近几章/实体清单/"
-        "作者提示/章号/标题。各 block 占位符已含标题行或为空，可整段编辑。",
+        "description": "规划章节 beat 的用户消息，注入梗概/卷大纲/近几章/未回收线索/"
+        "实体清单/作者提示/章号/标题。各 block 占位符已含标题行或为空，可整段编辑。",
         "placeholders": [
             _ph("synopsis", "全书梗概", "outline.read_synopsis()"),
             _ph("volume_arc_block", "本卷大纲块（含“本卷大纲：”标题行，无则空）", "outline.read_volume()"),
             _ph("prev_desc_block", "近几章梗概块（含标题行，无则空）", "outline.list_chapters() 最近3章"),
+            _ph("open_threads_block", "未回收情节线索块（含标题行，无则空）", "threads.format_open_threads()"),
             _ph("entity_registry_block", "已有实体清单块（含标题行，无则空）", "codex.iter_all()"),
             _ph("hint_block", "作者提示块（含“作者提示：”标题行，无则空）", "用户 hint 参数"),
             _ph("number", "本章序号", "章节号"),
@@ -228,9 +229,11 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "user",
         "zh_name": "一致性审校 · 用户",
         "zh_module": "一致性审校",
-        "description": "一致性审校的用户消息，约定 issues[]/overall/summary 的 JSON 输出格式，"
-        "并附本章正文。注意 JSON 花括号已用 {{ }} 转义。",
+        "description": "一致性审校的用户消息，注入参照上下文（设定/状态/摘要/beat）"
+        "与本章正文，约定 issues[]/overall/summary 的 JSON 输出格式。"
+        "注意 JSON 花括号已用 {{ }} 转义。",
         "placeholders": [
+            _ph("context", "审校参照材料（check 模式组装的上下文）", "assembler.assemble_for_chapter(mode='check')"),
             _ph("chapter_text", "本章草稿正文", "drafts/ch<N>.md"),
         ],
         "in_use": True,
@@ -238,24 +241,24 @@ PROMPT_META: dict[str, dict[str, Any]] = {
     "fix_system": {
         "stage": STAGE_CHECKING,
         "role": "system",
-        "zh_name": "自动修复（未使用） · 系统",
-        "zh_module": "自动修复（未使用）",
-        "description": "（保留字段，当前未被流水线使用）自动修复的系统提示。",
+        "zh_name": "定点修复 · 系统",
+        "zh_module": "定点修复",
+        "description": "审校自动修复的系统提示：只修改与问题相关的段落，"
+        "保留其余正文与文风（由 Writer.apply_minimal_fix 使用）。",
         "placeholders": [],
-        "in_use": False,
+        "in_use": True,
     },
     "fix_user": {
         "stage": STAGE_CHECKING,
         "role": "user",
-        "zh_name": "自动修复（未使用） · 用户",
-        "zh_module": "自动修复（未使用）",
-        "description": "（保留字段，当前未被流水线使用）自动修复的用户消息，"
-        "注入待修订正文与审校问题。",
+        "zh_name": "定点修复 · 用户",
+        "zh_module": "定点修复",
+        "description": "审校自动修复的用户消息，注入待修订正文与审校问题列表。",
         "placeholders": [
             _ph("chapter_text", "本章草稿正文", "drafts/ch<N>.md"),
             _ph("issues", "审校发现的问题列表", "checker 输出"),
         ],
-        "in_use": False,
+        "in_use": True,
     },
     "codex_enrich_system": {
         "stage": STAGE_ENRICHMENT,
@@ -277,6 +280,121 @@ PROMPT_META: dict[str, dict[str, Any]] = {
             _ph("chapter_number", "本章序号", "章节号"),
             _ph("chapter_text", "本章草稿正文（截断至 16384 字符）", "drafts/ch<N>.md"),
             _ph("existing_codex", "已有的实体清单文本", "codex.iter_all() 格式化"),
+        ],
+        "in_use": True,
+    },
+    "style_generate_system": {
+        "stage": STAGE_WRITING,
+        "role": "system",
+        "zh_name": "风格指南反推 · 系统",
+        "zh_module": "风格指南",
+        "description": "从已写章节样本提炼「写作风格指南」（人称/时态/基调/禁忌/示例段落）"
+        "的系统提示，由 `rimbook style generate` 使用。",
+        "placeholders": [],
+        "in_use": True,
+    },
+    "style_generate_user": {
+        "stage": STAGE_WRITING,
+        "role": "user",
+        "zh_name": "风格指南反推 · 用户",
+        "zh_module": "风格指南",
+        "description": "风格指南反推的用户消息，注入书名与章节正文样本。",
+        "placeholders": [
+            _ph("title", "小说标题", "config.title"),
+            _ph("samples", "最近几章的正文节选", "drafts/ch*.md"),
+        ],
+        "in_use": True,
+    },
+    "volume_recap_system": {
+        "stage": STAGE_SUMMARIZATION,
+        "role": "system",
+        "zh_name": "卷情节回顾 · 系统",
+        "zh_module": "分层记忆",
+        "description": "把一卷的章节摘要压缩为「卷情节回顾」（实际发生的剧情，400-600 字）"
+        "的系统提示；卷完结后自动生成，注入后续章节上下文。",
+        "placeholders": [],
+        "in_use": True,
+    },
+    "volume_recap_user": {
+        "stage": STAGE_SUMMARIZATION,
+        "role": "user",
+        "zh_name": "卷情节回顾 · 用户",
+        "zh_module": "分层记忆",
+        "description": "卷情节回顾的用户消息，注入卷号/卷名与该卷各章摘要。",
+        "placeholders": [
+            _ph("volume_number", "卷号", "卷序号"),
+            _ph("volume_title", "卷标题", "outline/volumes/volNN.md"),
+            _ph("chapter_summaries", "该卷各章摘要拼接", "outline.list_chapters()"),
+        ],
+        "in_use": True,
+    },
+    "story_so_far_system": {
+        "stage": STAGE_SUMMARIZATION,
+        "role": "system",
+        "zh_name": "全书至今故事线 · 系统",
+        "zh_module": "分层记忆",
+        "description": "增量维护「全书至今」滚动故事线的系统提示：早期剧情压缩更狠、"
+        "近期剧情保留细节；每写 N 章自动刷新。",
+        "placeholders": [],
+        "in_use": True,
+    },
+    "story_so_far_user": {
+        "stage": STAGE_SUMMARIZATION,
+        "role": "user",
+        "zh_name": "全书至今故事线 · 用户",
+        "zh_module": "分层记忆",
+        "description": "全书至今故事线的用户消息，注入已有故事线与新增章节摘要。",
+        "placeholders": [
+            _ph("prev_upto", "已有故事线截至的章号", "outline/story_so_far.md frontmatter"),
+            _ph("previous", "已有故事线全文", "outline/story_so_far.md"),
+            _ph("new_summaries", "新增章节摘要拼接", "outline.list_chapters()"),
+            _ph("upto", "本次更新截至的章号", "章节号"),
+        ],
+        "in_use": True,
+    },
+    "thread_extract_system": {
+        "stage": STAGE_SUMMARIZATION,
+        "role": "system",
+        "zh_name": "情节线索抽取 · 系统",
+        "zh_module": "情节线索",
+        "description": "写后从章节正文抽取情节线索变化（新埋/推进/回收）的系统提示，"
+        "结果合并进 state/threads.yaml 账本。",
+        "placeholders": [],
+        "in_use": True,
+    },
+    "thread_extract_user": {
+        "stage": STAGE_SUMMARIZATION,
+        "role": "user",
+        "zh_name": "情节线索抽取 · 用户",
+        "zh_module": "情节线索",
+        "description": "情节线索抽取的用户消息，注入章号、正文与当前未回收线索清单。",
+        "placeholders": [
+            _ph("chapter_number", "本章序号", "章节号"),
+            _ph("chapter_text", "本章草稿正文（截断至 16384 字符）", "drafts/ch<N>.md"),
+            _ph("open_threads", "当前未回收线索清单", "ThreadStore.format_open_threads()"),
+        ],
+        "in_use": True,
+    },
+    "macro_review_system": {
+        "stage": STAGE_CHECKING,
+        "role": "system",
+        "zh_name": "宏观审阅 · 系统",
+        "zh_module": "宏观审阅",
+        "description": "卷级/区间级宏观编辑审阅的系统提示：检查节奏、重复桥段、"
+        "角色声音趋同、线索管理与结构失衡，由 `rimbook review` 使用。",
+        "placeholders": [],
+        "in_use": True,
+    },
+    "macro_review_user": {
+        "stage": STAGE_CHECKING,
+        "role": "user",
+        "zh_name": "宏观审阅 · 用户",
+        "zh_module": "宏观审阅",
+        "description": "宏观审阅的用户消息，注入审阅范围、各章信息摘要与正文抽样。",
+        "placeholders": [
+            _ph("scope", "审阅范围描述", "CLI 参数"),
+            _ph("chapter_digest", "各章标题/张力/功能/摘要拼接", "outline.list_chapters()"),
+            _ph("prose_samples", "各章开头/结尾正文抽样", "drafts/ch*.md"),
         ],
         "in_use": True,
     },
@@ -485,6 +603,7 @@ def render_preview(
         "title_hint": "",
         "volume_arc_block": volume_arc_block,
         "prev_desc_block": prev_desc_block,
+        "open_threads_block": "",
         "entity_registry_block": entity_registry_block,
         "hint_block": hint_block,
         "title_block": title_block,
@@ -496,6 +615,20 @@ def render_preview(
         "entity_ids": _format_entity_ids(entity_ids),
         "existing_codex": existing_codex,
         "issues": "（占位示例：审校发现的问题列表）",
+        # Style / hierarchical memory / threads / macro review previews.
+        "title": "",
+        "samples": chapter_text[:2000] if chapter_text else "（占位示例：章节正文样本）",
+        "volume_number": "1",
+        "volume_title": "",
+        "chapter_summaries": "（占位示例：该卷各章摘要）",
+        "prev_upto": "0",
+        "previous": "（尚无，故事刚开始）",
+        "new_summaries": "（占位示例：新增章节摘要）",
+        "upto": number_str,
+        "open_threads": "（占位示例：未回收线索清单）",
+        "scope": f"第 1-{number_str} 章",
+        "chapter_digest": "（占位示例：各章信息摘要）",
+        "prose_samples": "（占位示例：正文抽样）",
     }
     # Fill volume-specific helpers if requested.
     if outline is not None and ("existing_desc" in required or "title_hint" in required):
@@ -518,8 +651,16 @@ class _DefaultDict(dict):
 
 
 def _safe_format(template: str, mapping: dict[str, Any]) -> str:
-    """str.format that tolerates unknown placeholders (kept verbatim)."""
-    return template.format_map(_DefaultDict(mapping))
+    """str.format that tolerates unknown placeholders (kept verbatim).
+
+    Templates that embed literal JSON braces (e.g. system prompts describing
+    an output contract) can't be run through ``str.format`` — for those we
+    return the template verbatim rather than raising.
+    """
+    try:
+        return template.format_map(_DefaultDict(mapping))
+    except (ValueError, IndexError):
+        return template
 
 
 def _chapter_to_text(chapter) -> str:

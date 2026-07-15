@@ -8,6 +8,7 @@ const router = createRouter({
     { path: '/codex', name: 'codex', component: () => import('../views/CodexManager.vue') },
     { path: '/outline', name: 'outline', component: () => import('../views/OutlineEditor.vue') },
     { path: '/writer', name: 'writer', component: () => import('../views/WriterStudio.vue') },
+    { path: '/narrative', name: 'narrative', component: () => import('../views/Narrative.vue') },
     { path: '/workflow', name: 'workflow', component: () => import('../views/Workflow.vue') },
     { path: '/settings', name: 'settings', component: () => import('../views/Settings.vue') },
   ],

@@ -244,8 +244,14 @@ onMounted(fetchEntries)
 .body-text :deep(strong) { font-weight: 600; }
 .body-text :deep(p) { margin: 0 0 8px; }
 
-/* Timeline */
-.timeline { position: relative; padding-left: 24px; }
+/* Timeline — same scroll constraints as .body-text */
+.timeline {
+  position: relative;
+  padding-left: 24px;
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 8px;
+}
 .timeline::before { content: ''; position: absolute; left: 8px; top: 0; bottom: 0; width: 2px; background: var(--rb-border); }
 .timeline-item { position: relative; margin-bottom: 20px; }
 .timeline-dot { position: absolute; left: -20px; top: 6px; width: 10px; height: 10px; border-radius: 50%; background: var(--rb-primary); border: 2px solid var(--rb-bg-surface); }
@@ -255,7 +261,14 @@ onMounted(fetchEntries)
 .timeline-source { font-size: 12px; color: var(--rb-text-muted); font-style: italic; }
 
 /* Contradictions */
-.contra-list { display: flex; flex-direction: column; gap: 12px; }
+.contra-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  height: 100%;
+  overflow-y: auto;
+  padding-right: 8px;
+}
 .contra-item { background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; padding: 14px 16px; }
 .contra-item.resolved { background: #f0fdf4; border-color: #bbf7d0; opacity: 0.7; }
 .contra-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }

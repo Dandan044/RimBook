@@ -51,3 +51,6 @@ _codex_tmpl_b64.txt
 # ZCode plans
 .zcode/
 server.log
+
+# LLM response provenance logs (per-project, may contain commercial settings)
+.llm_logs/

@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { Close } from '@element-plus/icons-vue'
 import {
   getPrompts, updatePrompt, resetPrompt, resetAllPrompts, previewPrompt,
   type PromptEntry,
 } from '../api'
 import { useProjectStore } from '../stores/project'
+import PipelineFlow from './PipelineFlow.vue'
+import { STAGES as PIPELINE_STAGES, type StageMeta as PipelineStageMeta } from './pipelineData'
 
 interface StageMeta { key: string; label: string }
 
@@ -15,6 +18,33 @@ const STORE: Record<string, StageMeta> = {
   summarization: { key: 'summarization', label: '摘要与状态' },
   checking: { key: 'checking', label: '校验' },
   enrichment: { key: 'enrichment', label: '设定扩充' },
+}
+
+// ---- Tab switching ----
+type WorkflowTab = 'prompts' | 'pipeline'
+const currentTab = ref<WorkflowTab>('prompts')
+const selectedPipelineStage = ref<PipelineStageMeta | null>(null)
+
+function onSelectPipelineStage(stage: PipelineStageMeta | null) {
+  selectedPipelineStage.value = stage
+}
+
+const pipelineRef = ref<InstanceType<typeof PipelineFlow> | null>(null)
+
+function resetPipelineView() {
+  pipelineRef.value?.resetView()
+}
+
+const PIPELINE_COLORS: Record<string, string> = {
+  planner: '--rb-primary',
+  'context-assembler': '--rb-accent-sky',
+  writer: '--rb-primary',
+  'post-write': '--rb-accent-amber',
+  checker: '--rb-accent-rose',
+}
+
+function pipelineStageColor(id: string): string {
+  return `var(${PIPELINE_COLORS[id] ?? '--rb-primary'})`
 }
 
 const stageLabel = (s: string) => STORE[s]?.label ?? s
@@ -299,7 +329,33 @@ onMounted(async () => {
 <template>
   <div class="workflow-page">
     <div class="workflow-header">
-      <div>
+      <div class="header-top">
+        <div class="tab-bar">
+          <button
+            class="tab-btn"
+            :class="{ active: currentTab === 'prompts' }"
+            @click="currentTab = 'prompts'"
+          >
+            <span class="tab-icon">📝</span> 提示词
+          </button>
+          <button
+            class="tab-btn"
+            :class="{ active: currentTab === 'pipeline' }"
+            @click="currentTab = 'pipeline'"
+          >
+            <span class="tab-icon">🔀</span> 管线图
+          </button>
+        </div>
+        <div class="header-actions">
+          <el-tag v-if="currentTab === 'prompts' && overriddenCount > 0" type="warning" size="small">
+            已修改 {{ overriddenCount }} 项
+          </el-tag>
+          <el-button v-if="currentTab === 'prompts'" size="small" :disabled="reseting" @click="resetAll">
+            恢复默认（全部）
+          </el-button>
+        </div>
+      </div>
+      <div v-if="currentTab === 'prompts'">
         <h1>工作流 · 提示词</h1>
         <p class="muted">
           集中查看和即时编辑所有发给 LLM 的提示词模板。
@@ -307,17 +363,16 @@ onMounted(async () => {
           覆盖仅写入工作区级 <code>prompts.yaml</code>，不影响内建默认值。
         </p>
       </div>
-      <div class="header-actions">
-        <el-tag v-if="overriddenCount > 0" type="warning" size="small">
-          已修改 {{ overriddenCount }} 项
-        </el-tag>
-        <el-button size="small" :disabled="reseting" @click="resetAll">
-          恢复默认（全部）
-        </el-button>
+      <div v-else>
+        <h1>工作流 · 管线图</h1>
+        <p class="muted">
+          数据流视角：每个 LLM 阶段从哪里读取上下文，产出后流向何处。拖拽平移 · 滚轮缩放 · 点击节点查看详情。
+        </p>
       </div>
     </div>
 
-    <div class="workflow-body">
+    <!-- Prompt editor view -->
+    <div v-if="currentTab === 'prompts'" class="workflow-body">
       <!-- Left column: modules grouped by stage -->
       <aside class="prompt-list">
         <el-input v-model="keyword" placeholder="搜索提示词或模块…" clearable size="small" class="search" />
@@ -470,6 +525,69 @@ onMounted(async () => {
         <el-empty description="选择左侧某一模块以查看与编辑" />
       </section>
     </div>
+
+    <!-- Pipeline view -->
+    <div v-else class="pipeline-view">
+      <div class="pipeline-view-body">
+        <div class="pipeline-diagram-area">
+          <PipelineFlow @select-stage="onSelectPipelineStage" />
+          <div class="pipeline-toolbar">
+            <el-button size="small" text @click="resetPipelineView">重置视图</el-button>
+            <span class="pipeline-hint">滚轮缩放 · 拖拽平移 · 点击节点查看详情</span>
+          </div>
+        </div>
+        <div class="pipeline-detail-panel" v-if="selectedPipelineStage">
+          <div class="pd-header">
+            <span class="pd-badge" :style="{ background: pipelineStageColor(selectedPipelineStage.id) }">
+              {{ selectedPipelineStage.id }}
+            </span>
+            <h3 class="pd-title">{{ selectedPipelineStage.nameZh }}</h3>
+            <p class="pd-en">{{ selectedPipelineStage.nameEn }}</p>
+            <el-button size="small" text class="pd-close" @click="selectedPipelineStage = null">
+              <el-icon><Close /></el-icon>
+            </el-button>
+          </div>
+          <p class="pd-desc">{{ selectedPipelineStage.description }}</p>
+
+          <div class="pd-section">
+            <h4 class="pd-section-title"><span class="dot dot-read"></span> 读取来源</h4>
+            <ul class="pd-list">
+              <li v-for="r in selectedPipelineStage.reads" :key="r.source">
+                <code>{{ r.source }}</code>
+                <span class="pd-list-desc">{{ r.desc }}</span>
+              </li>
+            </ul>
+          </div>
+          <div class="pd-section">
+            <h4 class="pd-section-title"><span class="dot dot-write"></span> 写入目标</h4>
+            <ul class="pd-list">
+              <li v-for="w in selectedPipelineStage.writes" :key="w.target">
+                <code>{{ w.target }}</code>
+                <span class="pd-list-desc">{{ w.desc }}</span>
+              </li>
+            </ul>
+          </div>
+          <div class="pd-section" v-if="selectedPipelineStage.llmPrompts.length">
+            <h4 class="pd-section-title"><span class="dot dot-llm"></span> LLM 提示词</h4>
+            <div class="pd-prompts">
+              <el-tag v-for="p in selectedPipelineStage.llmPrompts" :key="p" size="small" effect="plain" class="prompt-tag">{{ p }}</el-tag>
+            </div>
+          </div>
+        </div>
+        <div class="pipeline-detail-panel pipeline-detail-panel--empty" v-else>
+          <el-empty description="点击流程图中的节点查看详情" :image-size="60" />
+          <div class="legend-box">
+            <h4>图例说明</h4>
+            <div class="legend-grid">
+              <div class="legend-item"><span class="legend-swatch s-stage"></span> LLM 阶段节点</div>
+              <div class="legend-item"><span class="legend-swatch s-store"></span> 持久化存储</div>
+              <div class="legend-item"><span class="legend-swatch s-input"></span> 外部输入</div>
+              <div class="legend-item"><span class="legend-swatch s-data"></span> 中间数据 / 输出</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -602,4 +720,276 @@ onMounted(async () => {
 .prompt-empty { display: flex; align-items: center; justify-content: center; }
 .muted { color: var(--rb-text-muted); }
 code { font-family: 'SFMono-Regular', 'Cascadia Code', Consolas, monospace; font-size: 12px; }
+
+/* ---- Tab bar ---- */
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  background: var(--rb-bg-subtle);
+  border-radius: 10px;
+  padding: 3px;
+}
+
+.tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 16px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--rb-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+}
+
+.tab-btn:hover {
+  color: var(--rb-text-primary);
+  background: var(--rb-bg-surface);
+}
+
+.tab-btn.active {
+  background: var(--rb-bg-surface);
+  color: var(--rb-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.tab-icon {
+  font-size: 14px;
+}
+
+/* ---- Pipeline view ---- */
+.pipeline-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.pipeline-view-body {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  gap: 16px;
+  padding: 16px;
+}
+
+.pipeline-diagram-area {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 0;
+}
+
+.pipeline-diagram-area > :first-child {
+  flex: 1;
+  min-height: 0;
+}
+
+.pipeline-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--rb-bg-surface);
+  border: 1px solid var(--rb-border-light);
+  border-top: none;
+  border-radius: 0 0 var(--rb-border-radius) var(--rb-border-radius);
+}
+
+.pipeline-hint {
+  font-size: 11px;
+  color: var(--rb-text-muted);
+}
+
+/* ---- Pipeline detail panel ---- */
+.pipeline-detail-panel {
+  background: var(--rb-bg-surface);
+  border: 1px solid var(--rb-border-light);
+  border-radius: var(--rb-border-radius-lg);
+  padding: 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.pipeline-detail-panel--empty {
+  justify-content: center;
+  align-items: center;
+}
+
+.pd-header {
+  position: relative;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--rb-border-light);
+  margin-bottom: 12px;
+}
+
+.pd-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 20px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.pd-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--rb-text-primary);
+  margin: 0 0 2px;
+}
+
+.pd-en {
+  font-size: 12px;
+  color: var(--rb-text-muted);
+  margin: 0;
+  font-style: italic;
+}
+
+.pd-close {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+}
+
+.pd-desc {
+  font-size: 12.5px;
+  color: var(--rb-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 14px;
+}
+
+.pd-section {
+  margin-bottom: 14px;
+}
+
+.pd-section-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--rb-text-primary);
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.dot-read { background: #10b981; }
+.dot-write { background: #0ea5e9; }
+.dot-llm { background: #6366f1; }
+
+.pd-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.pd-list li {
+  padding: 5px 8px;
+  margin-bottom: 3px;
+  background: var(--rb-bg-subtle);
+  border-radius: 5px;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.pd-list li code {
+  font-size: 10.5px;
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+  background: var(--rb-primary-bg);
+  color: var(--rb-primary);
+  padding: 1px 5px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-right: 5px;
+  margin-bottom: 2px;
+}
+
+.pd-list-desc {
+  color: var(--rb-text-muted);
+}
+
+.pd-prompts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.prompt-tag {
+  font-family: 'SF Mono', 'Cascadia Code', 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+
+/* ---- Legend in pipeline detail ---- */
+.legend-box {
+  margin-top: 16px;
+  text-align: left;
+  width: 100%;
+}
+
+.legend-box h4 {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--rb-text-primary);
+  margin: 0 0 8px;
+}
+
+.legend-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.legend-item {
+  font-size: 11px;
+  color: var(--rb-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.s-stage { background: #6366f1; }
+.s-store { background: #10b981; }
+.s-input { background: #f59e0b; }
+.s-data { background: #6b7280; }
+
+/* ---- Responsive pipeline ---- */
+@media (max-width: 992px) {
+  .pipeline-view-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr auto;
+  }
+  .pipeline-detail-panel {
+    max-height: 350px;
+  }
+}
 </style>

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 
 from ..codex import CodexStore, resolve_entity_ids
 from ..llm import LLMClient, Prompts
+from ..llm.trace import NULL_TRACE, TraceStore
+from ..memory.threads import ThreadStore
 from ..outline import ChapterOutline, OutlineStore, SceneBeat, VolumeOutline
 
 __all__ = ["Planner", "ChapterPlanResult"]
@@ -43,11 +45,18 @@ class Planner:
         prompts: Prompts,
         outline: OutlineStore,
         codex: CodexStore | None = None,
+        *,
+        threads: ThreadStore | None = None,
+        trace: TraceStore | None = None,
+        project_name: str = "",
     ) -> None:
         self.llm = llm
         self.prompts = prompts
         self.outline = outline
         self.codex = codex
+        self.threads = threads
+        self.trace = trace if trace is not None else NULL_TRACE
+        self.project_name = project_name
 
     # ------------------------------------------------------------------
     # Synopsis
@@ -58,7 +67,9 @@ class Planner:
             system=self.prompts.synopsis_system,
             user=self.prompts.synopsis_user.format(premise=premise),
         )
-        result = self.llm.generate(messages, temperature=0.8)
+        with self.trace.begin("synopsis", project=self.project_name) as t:
+            result = self.llm.generate(messages, temperature=0.8)
+            t.record(messages, result)
         text = result.content.strip()
         if persist:
             self.outline.write_synopsis(text)
@@ -82,7 +93,9 @@ class Planner:
                 title_hint=(f"（标题：{title}）" if title else ""),
             ),
         )
-        result = self.llm.generate(messages, temperature=0.8)
+        with self.trace.begin("volume", project=self.project_name, volume=number) as t:
+            result = self.llm.generate(messages, temperature=0.8)
+            t.record(messages, result)
         arc = result.content.strip()
 
         vol = VolumeOutline(number=number, title=title, arc=arc)
@@ -155,6 +168,7 @@ class Planner:
                 existing_beats_block = f"本章已有 beat（参考已有内容重新规划）：\n{beat_goals}\n\n"
 
         entity_registry = self._format_entity_registry()
+        open_threads = self._format_open_threads(number)
 
         messages = self.llm.as_chat(
             system=self.prompts.chapter_outline_system,
@@ -162,6 +176,10 @@ class Planner:
                 synopsis=synopsis,
                 volume_arc_block=(f"本卷大纲：\n{volume_arc}\n\n" if volume_arc else ""),
                 prev_desc_block=(f"近几章梗概：\n{prev_desc}\n\n" if prev_desc else ""),
+                open_threads_block=(
+                    f"未回收的情节线索（本章可推进或回收，不得遗忘）：\n{open_threads}\n\n"
+                    if open_threads else ""
+                ),
                 entity_registry_block=(
                     f"{entity_registry}\n\n" if entity_registry else ""
                 ),
@@ -175,7 +193,9 @@ class Planner:
         if existing_summary_block or existing_beats_block:
             messages[-1]["content"] += "\n\n" + existing_summary_block + existing_beats_block + "请基于上述已有内容为第 {number} 章重新规划 beat。".replace("{number}", str(number))
         # Ask for JSON so we can parse beats + entities reliably.
-        result = self.llm.generate_json(messages, temperature=0.7)
+        with self.trace.begin("planner", project=self.project_name, chapter=number) as t:
+            result = self.llm.generate_json(messages, temperature=0.7)
+            t.record(messages, result, model=self.llm.default_model)
         chapter, warnings = _parse_chapter_json(
             number, result, volume=volume, title=title, codex=self.codex
         )
@@ -202,6 +222,15 @@ class Planner:
             new_entity_ids=new_ids,
             id_warnings=warnings,
         )
+
+    def _format_open_threads(self, number: int) -> str:
+        """Format the unresolved plot threads for the chapter-planning prompt."""
+        if self.threads is None:
+            return ""
+        try:
+            return self.threads.format_open_threads(upto_chapter=number)
+        except Exception:
+            return ""
 
     def _format_entity_registry(self) -> str:
         """Build the 'existing entities' block for the chapter-planning prompt."""
@@ -234,8 +263,14 @@ def _format_prev_chapters(chapters: list[ChapterOutline]) -> str:
     parts = []
     for c in chapters:
         beat_goals = "; ".join(b.goal for b in c.beats) or "(无beat)"
+        extras = []
+        if c.tension:
+            extras.append(f"张力{c.tension}/5")
+        if c.story_date:
+            extras.append(f"故事时间：{c.story_date}")
+        extra_str = f"（{'，'.join(extras)}）" if extras else ""
         parts.append(
-            f"第{c.number}章《{c.title}》计划：{beat_goals}"
+            f"第{c.number}章《{c.title}》{extra_str}计划：{beat_goals}"
             + (f"；摘要：{c.summary.strip()}" if c.summary.strip() else "")
         )
     return "\n".join(parts)
@@ -305,6 +340,12 @@ def _parse_chapter_json(
             seen.add(eid)
             all_ents.append(eid)
 
+    tension_raw = data.get("tension")
+    try:
+        tension = min(max(int(tension_raw), 0), 5) if tension_raw is not None else 0
+    except (TypeError, ValueError):
+        tension = 0
+
     chapter = ChapterOutline(
         number=number,
         title=title,
@@ -313,5 +354,11 @@ def _parse_chapter_json(
         entities=all_ents,
         tags=tags,
         notes=notes,
+        purpose=str(data.get("purpose", "") or ""),
+        value_shift=str(data.get("value_shift", "") or ""),
+        tension=tension,
+        hook=str(data.get("hook", "") or ""),
+        story_date=str(data.get("story_date", "") or ""),
+        elapsed=str(data.get("elapsed", "") or ""),
     )
     return chapter, warnings
