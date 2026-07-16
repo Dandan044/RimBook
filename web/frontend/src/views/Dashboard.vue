@@ -50,6 +50,24 @@
         </div>
       </div>
 
+      <!-- Token usage -->
+      <div class="section">
+        <div class="section-header">
+          <h2 class="section-title">
+            <el-icon class="section-icon"><Coin /></el-icon>
+            Token 用量
+          </h2>
+          <span class="chapter-count" v-if="usage">{{ usage.calls_with_usage }} / {{ usage.calls }} 次有用量</span>
+        </div>
+        <div class="token-grid">
+          <div class="token-card" v-for="(card, idx) in tokenCards" :key="idx">
+            <div class="token-label">{{ card.label }}</div>
+            <div class="token-value" :style="{ color: card.color }">{{ card.value }}</div>
+            <div class="token-hint">{{ card.hint }}</div>
+          </div>
+        </div>
+      </div>
+
       <!-- Synopsis -->
       <div class="section">
         <div class="section-header">
@@ -63,7 +81,7 @@
           <div v-else class="empty-state">
             <el-icon :size="32" class="empty-icon"><Document /></el-icon>
             <p>尚未生成梗概</p>
-            <span class="empty-hint-text">前往「大纲」页面，点击"生成梗概"开始创作之旅</span>
+            <span class="empty-hint-text">前往「写作规划」页面，点击"生成梗概"开始创作之旅</span>
           </div>
         </div>
       </div>
@@ -129,9 +147,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useProjectStore } from '../stores/project'
-import { getSynopsis } from '../api'
+import { getLlmUsage, getSynopsis, type LlmUsageStats } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const store = useProjectStore()
@@ -139,6 +157,7 @@ const showCreate = ref(false)
 const synopsis = ref('')
 const createForm = ref({ name: '', title: '', author: '' })
 const deleting = ref(false)
+const usage = ref<LlmUsageStats | null>(null)
 
 const headerCellStyle = {
   fontWeight: '600',
@@ -183,11 +202,49 @@ const statCardsMeta = computed(() => {
   ]
 })
 
+function formatTokens(n: number | undefined | null): string {
+  if (n == null) return '—'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
+  if (n >= 10_000) return `${(n / 1000).toFixed(1)}k`
+  return n.toLocaleString('zh-CN')
+}
+
+const tokenCards = computed(() => {
+  const u = usage.value
+  return [
+    {
+      label: '输入 Tokens',
+      value: formatTokens(u?.prompt_tokens ?? 0),
+      hint: 'prompt_tokens',
+      color: '#0ea5e9',
+    },
+    {
+      label: '输出 Tokens',
+      value: formatTokens(u?.completion_tokens ?? 0),
+      hint: 'completion_tokens',
+      color: '#f59e0b',
+    },
+    {
+      label: '汇总 Tokens',
+      value: formatTokens(u?.total_tokens ?? 0),
+      hint: 'total_tokens',
+      color: '#6366f1',
+    },
+  ]
+})
+
 async function onProjectChange() {
   await store.fetchStatus()
+  usage.value = null
   if (store.currentId) {
-    const r = await getSynopsis(store.currentId)
+    const [r, u] = await Promise.all([
+      getSynopsis(store.currentId),
+      getLlmUsage(store.currentId).catch(() => null),
+    ])
     synopsis.value = r.text
+    usage.value = u
+  } else {
+    synopsis.value = ''
   }
 }
 
@@ -332,6 +389,43 @@ onMounted(async () => {
   font-weight: 500;
   color: var(--rb-text-muted);
   letter-spacing: -0.01em;
+}
+
+/* ===== Token usage ===== */
+.token-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 14px;
+}
+
+.token-card {
+  background: var(--rb-bg-surface);
+  border: 1px solid var(--rb-border-light);
+  border-radius: 12px;
+  padding: 18px 20px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.token-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--rb-text-muted);
+  margin-bottom: 6px;
+}
+
+.token-value {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+}
+
+.token-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--rb-text-subtle);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 /* ===== Section ===== */
@@ -522,6 +616,9 @@ onMounted(async () => {
   .stat-grid {
     grid-template-columns: 1fr 1fr;
     gap: 10px;
+  }
+  .token-grid {
+    grid-template-columns: 1fr;
   }
   .stat-card {
     padding: 14px;

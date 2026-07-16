@@ -15,6 +15,7 @@ can review the draft before committing to consistency checks / fixes.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -98,11 +99,27 @@ class Writer:
             project_name=self.project_name,
         )
 
-    def write(self, number: int, *, persist: bool = True) -> WriteResult:
-        """Generate (and persist) the draft for chapter *number*."""
+    def write(
+        self,
+        number: int,
+        *,
+        persist: bool = True,
+        on_token: Callable[[str], None] | None = None,
+        on_progress: Callable[[str], None] | None = None,
+    ) -> WriteResult:
+        """Generate (and persist) the draft for chapter *number*.
+
+        If *on_token* is provided, prose is streamed via
+        :meth:`LLMClient.generate_stream` and each delta is forwarded so the
+        UI can render tokens as they arrive.
+        """
         chapter = self.outline.read_chapter(number)
         if chapter is None:
             raise FileNotFoundError(f"Chapter {number} has no outline; run `plan chapter` first.")
+
+        def _progress(msg: str) -> None:
+            if on_progress is not None:
+                on_progress(msg)
 
         with self._lock:
             # ---- Rollback previous run's artifacts if re-generating ----
@@ -124,44 +141,60 @@ class Writer:
                 and self.version_manager is not None
                 and self.generation.auto_checkpoint
             ):
+                _progress("正在回滚上一版产物…")
+                _progress("正在回滚上一版产物…")
                 base_cp = _find_earliest_checkpoint(
                     self.version_manager, f"write-ch{number}-"
                 )
                 if base_cp:
                     affected = self._predict_affected_files(number, chapter)
-                    # Only roll back entity state and codex files; draft and
-                    # outline will be freshly generated anyway.
-                    state_codex_files = [
-                        f for f in affected
-                        if _is_state_or_codex(f)
-                    ]
+                    # Roll back cumulative runtime assets; draft / chapter
+                    # outline will be freshly generated. Volume outline files
+                    # are restored without delete_missing (planning data must
+                    # survive even if an older checkpoint omitted them).
+                    delete_ok = [f for f in affected if _is_rollback_delete_ok(f)]
+                    volumes_only = [f for f in affected if _is_volume_outline(f)]
                     logger.warning(
-                        "ROLLBACK: checkpoint=%s affected=%d state_codex=%d",
-                        base_cp.name, len(affected), len(state_codex_files),
+                        "ROLLBACK: checkpoint=%s affected=%d delete_ok=%d volumes=%d",
+                        base_cp.name, len(affected), len(delete_ok), len(volumes_only),
                     )
-                    if state_codex_files:
+                    result: dict = {"restored": 0, "skipped": 0, "deleted": 0}
+                    if delete_ok:
                         result = self.version_manager.restore_checkpoint(
-                            base_cp.name, files=state_codex_files,
+                            base_cp.name, files=delete_ok,
                             delete_missing=True,
                         )
-                        logger.warning(
-                            "ROLLBACK: result restored=%d skipped=%d deleted=%d "
-                            "(from %s)",
-                            result.get("restored", 0),
-                            result.get("skipped", 0),
-                            result.get("deleted", 0),
-                            base_cp.name,
+                    if volumes_only:
+                        vol_result = self.version_manager.restore_checkpoint(
+                            base_cp.name, files=volumes_only,
+                            delete_missing=False,
                         )
-                        logger.info(
-                            "Re-generating chapter %d: rolled back %d files "
-                            "(state + codex) from checkpoint %s "
-                            "(%d skipped, %d deleted — created by previous post-write)",
-                            number,
-                            result.get("restored", 0),
-                            base_cp.name,
-                            result.get("skipped", 0),
-                            result.get("deleted", 0),
+                        result["restored"] = (
+                            result.get("restored", 0) + vol_result.get("restored", 0)
                         )
+                        result["skipped"] = (
+                            result.get("skipped", 0) + vol_result.get("skipped", 0)
+                        )
+                    # Safety net for older checkpoints / cumulative ledgers.
+                    self._cleanup_narrative_after_rollback(number)
+                    logger.warning(
+                        "ROLLBACK: result restored=%d skipped=%d deleted=%d "
+                        "(from %s)",
+                        result.get("restored", 0),
+                        result.get("skipped", 0),
+                        result.get("deleted", 0),
+                        base_cp.name,
+                    )
+                    logger.info(
+                        "Re-generating chapter %d: rolled back runtime assets "
+                        "from checkpoint %s "
+                        "(%d restored, %d skipped, %d deleted)",
+                        number,
+                        base_cp.name,
+                        result.get("restored", 0),
+                        result.get("skipped", 0),
+                        result.get("deleted", 0),
+                    )
                 else:
                     logger.warning(
                         "ROLLBACK: no checkpoint found for prefix write-ch%d-",
@@ -176,9 +209,11 @@ class Writer:
                 self.version_manager.prune(self.generation.max_checkpoints)
 
             # 1. Assemble context.
+            _progress("正在组装上下文…")
             context = self.assembler.assemble_for_chapter(chapter)
 
-            # 2. Generate.
+            # 2. Generate (optionally streaming tokens to the caller).
+            _progress("正在生成正文…")
             messages = self.llm.as_chat(
                 system=self.prompts.writer_system,
                 user=self.prompts.writer_user.format(
@@ -187,11 +222,28 @@ class Writer:
                 ),
             )
             with self.trace.begin("writer", project=self.project_name, chapter=number) as t:
-                gen = self.llm.generate(
-                    messages,
-                    temperature=self.generation.temperature,
-                    max_tokens=self.generation.max_tokens,
-                )
+                if on_token is not None:
+                    thinking_started = False
+
+                    def _on_reasoning(_piece: str) -> None:
+                        nonlocal thinking_started
+                        if not thinking_started:
+                            thinking_started = True
+                            _progress("模型思考中…")
+
+                    gen = self.llm.generate_stream(
+                        messages,
+                        temperature=self.generation.temperature,
+                        max_tokens=self.generation.max_tokens,
+                        on_token=on_token,
+                        on_reasoning=_on_reasoning,
+                    )
+                else:
+                    gen = self.llm.generate(
+                        messages,
+                        temperature=self.generation.temperature,
+                        max_tokens=self.generation.max_tokens,
+                    )
                 t.record(messages, gen, resolved_ids={
                     eid: eid for eid in chapter.all_entities()
                 })
@@ -205,6 +257,7 @@ class Writer:
                 save_context_snapshot(self.paths, number, context)
 
             # 4. Run post-write pipeline: summarize + state + codex enrichment.
+            _progress("正在后处理（摘要 / 设定 / 线索）…")
             enrich_result = self._enricher.run(
                 number,
                 draft,
@@ -269,7 +322,7 @@ class Writer:
                 instructions=instructions,
             )
 
-            messages = self.llm.as_chat(system=self.prompts.writer_system, user=user)
+            messages = self.llm.as_chat(system=self.prompts.writer_revise_system, user=user)
             with self.trace.begin("revise", project=self.project_name, chapter=number) as t:
                 gen = self.llm.generate(messages, temperature=0.7)
                 t.record(messages, gen)
@@ -301,54 +354,6 @@ class Writer:
                 entities_tracked=[],
                 usage=gen.usage,
             )
-
-    def apply_minimal_fix(
-        self,
-        number: int,
-        draft_text: str,
-        issues_blob: str,
-        *,
-        persist: bool = True,
-    ) -> str:
-        """Targeted fix for checker issues, changing as little prose as possible.
-
-        Unlike :meth:`revise` (a full rewrite with the complete writing
-        context), this path uses the dedicated ``fix`` prompts: the model sees
-        only the current prose + the audit issues and is instructed to touch
-        nothing else — so auto-fix rounds don't drift the chapter's voice.
-        Persists the fixed draft and re-runs the post-write pipeline so the
-        summary / entity state stay in sync with the corrected text.
-        """
-        chapter = self.outline.read_chapter(number)
-        if chapter is None:
-            raise FileNotFoundError(f"Chapter {number} has no outline.")
-
-        with self._lock:
-            if persist and self.version_manager is not None and self.generation.auto_checkpoint:
-                affected = self._predict_affected_files(number, chapter)
-                branch = self.version_manager.get_current_branch()
-                self.version_manager.create_checkpoint(f"fix-ch{number}-{branch}", affected)
-                self.version_manager.prune(self.generation.max_checkpoints)
-
-            messages = self.llm.as_chat(
-                system=self.prompts.fix_system,
-                user=self.prompts.fix_user.format(
-                    chapter_text=draft_text,
-                    issues=issues_blob,
-                ),
-            )
-            with self.trace.begin("fix", project=self.project_name, chapter=number) as t:
-                gen = self.llm.generate(messages, temperature=0.3)
-                t.record(messages, gen)
-            fixed = gen.content.strip()
-
-            if persist:
-                atomic_write(self.paths.draft_file(number), fixed + "\n")
-                # Keep downstream artifacts (summary / state / codex) in sync.
-                self._enricher.run(
-                    number, fixed, chapter, enrich=self.generation.auto_enrich
-                )
-            return fixed
 
     def apply_minimal_fix(
         self,
@@ -399,19 +404,29 @@ class Writer:
         """Predict the files that a write/revise of *number* will modify.
 
         Used by the auto-checkpoint to snapshot only the relevant files.
-        We snapshot ALL entity state and codex files (not just those
-        referenced in this chapter) so that branch forks from this
-        checkpoint can fully reconstruct the pre-write state.
+        We snapshot ALL entity state, codex, narrative memory, and review
+        files (not just those referenced in this chapter) so that branch
+        forks from this checkpoint can fully reconstruct the pre-write
+        state. Style bible (``outline/style.md``) is intentionally excluded
+        — it is author-managed and not chapter-cumulative.
         """
         affected = [
             self.paths.draft_file(number),
             self.paths.context_snapshot_file(number),
             self.paths.chapter_outline(number),
-            # Post-write may also touch the thread ledger and the rolling
-            # story-so-far recap; snapshot them so rollback/forks stay clean.
+            # Post-write narrative assets (version-controlled like codex).
             self.paths.threads_file,
             self.paths.story_so_far_file,
         ]
+        # Volume outlines carry realized recaps written by post-write.
+        if self.paths.volumes_dir.exists():
+            for vf in self.paths.volumes_dir.glob("vol*.md"):
+                affected.append(vf)
+        # Macro editorial reviews under state/reviews/.
+        reviews_dir = self.paths.reviews_dir
+        if reviews_dir.exists():
+            for rf in reviews_dir.glob("*.md"):
+                affected.append(rf)
         # ALL entity state files (post-write pipeline may touch any of them).
         state_dir = self.paths.state_dir / "entities"
         if state_dir.exists():
@@ -424,6 +439,19 @@ class Writer:
                 for cf in sd.glob("*.md"):
                     affected.append(cf)
         return affected
+
+    def _cleanup_narrative_after_rollback(self, number: int) -> None:
+        """Chapter-granular cleanup after file-level restore (old-CP safety net)."""
+        from ..memory.threads import ThreadStore
+        from ..versioning.cleanup import (
+            clean_story_so_far_post_chapter,
+            clean_threads_post_chapter,
+            clean_volume_recaps_post_chapter,
+        )
+
+        clean_threads_post_chapter(ThreadStore(self.paths), number)
+        clean_story_so_far_post_chapter(self.outline, number)
+        clean_volume_recaps_post_chapter(self.outline, number)
 
 
 def _find_earliest_checkpoint(
@@ -465,7 +493,25 @@ def _find_last_checkpoint(
     return None
 
 
-def _is_state_or_codex(path: Path) -> bool:
-    """Return True if *path* is an entity-state or codex file."""
+def _is_rollback_delete_ok(path: Path) -> bool:
+    """Runtime assets safe to restore with ``delete_missing=True``.
+
+    Includes state/ (entities, threads, reviews), codex/, and story-so-far.
+    Excludes volume outlines (planning data) and style bible.
+    """
     s = str(path).replace("\\", "/")
-    return "/state/" in s or "/codex/" in s
+    if "/state/" in s or "/codex/" in s:
+        return True
+    if s.endswith("/outline/story_so_far.md") or "/outline/story_so_far.md" in s:
+        return True
+    return False
+
+
+def _is_volume_outline(path: Path) -> bool:
+    s = str(path).replace("\\", "/")
+    return "/outline/volumes/" in s
+
+
+# Back-compat alias used by older call sites / tests.
+def _is_state_or_codex(path: Path) -> bool:
+    return _is_rollback_delete_ok(path) or _is_volume_outline(path)

@@ -7,6 +7,7 @@ import json
 import re
 import shutil
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -130,18 +131,19 @@ def fork_for_regen(
                 shutil.copy2(str(item), str(dest))
                 overlay += 1
 
-        # 2c. Delete state/codex files that were copied from the live project
-        #     but are absent from the pre-write checkpoint — they were created
-        #     by post-write of chapter >= N and must not leak into the fork.
+        # 2c. Delete version-controlled runtime files that were copied from
+        #     the live project but are absent from the pre-write checkpoint
+        #     (created by post-write of chapter >= N). Includes state/codex,
+        #     story-so-far, and reviews. Volume outlines are NOT deleted here
+        #     (planning data); their recaps are cleared in step 4.
+        #     Style bible is intentionally left alone.
         for item in list(full_dir.rglob("*")):
             if not item.is_file() or item.name == ".manifest":
                 continue
             rel = str(item.relative_to(full_dir)).replace("\\", "/")
-            if ("/state/" in f"/{rel}" or rel.startswith("state/")
-                    or "/codex/" in f"/{rel}" or rel.startswith("codex/")):
-                if rel not in cp_file_set:
-                    item.unlink()
-                    copied = max(0, copied - 1)
+            if _is_runtime_versioned_rel(rel) and rel not in cp_file_set:
+                item.unlink()
+                copied = max(0, copied - 1)
 
         # 2d. Write manifest.
         (full_dir / ".manifest").write_text(
@@ -204,6 +206,19 @@ def fork_for_regen(
     # 4c. Revert entity state knowledge / last_seen from chapters >= *number*.
     _clean_entity_state_post_chapter(deps, number)
 
+    # 4d. Narrative assets: threads / story-so-far / volume recaps / reviews.
+    from rimbook.versioning.cleanup import (
+        clean_reviews_not_in_snapshot,
+        clean_story_so_far_post_chapter,
+        clean_threads_post_chapter,
+        clean_volume_recaps_post_chapter,
+    )
+
+    clean_threads_post_chapter(deps.threads, number)
+    clean_story_so_far_post_chapter(deps.outline, number)
+    clean_volume_recaps_post_chapter(deps.outline, number)
+    clean_reviews_not_in_snapshot(deps.paths.reviews_dir, cp_file_set)
+
     return {
         "ok": True,
         "branch": branch_name,
@@ -216,7 +231,7 @@ def fork_for_regen(
             f"项目回退到第 {number} 章生成前的状态"
             f"（快照共 {copied} 个文件，其中 {overlay} 个来自预写快照覆盖，"
             f"已清理 {cleaned} 个后续章草稿，"
-            f"已剥离 codex/state 中来自 ≥{number} 章的内容）。"
+            f"已剥离 codex/state/线索/故事线/卷回顾/审阅 中来自 ≥{number} 章的内容）。"
             f"原分支「{current_branch}」的存档点：{saved or '无'}。"
         ),
     }
@@ -293,47 +308,63 @@ def get_chapter_context(
     return payload
 
 
-# ---- write (SSE) ----
+# ---- write (POST start + poll status; SSE is optional attach) ----
 
-@router.get("/write/{number}")
-def write_chapter_sse(
-    project_id: str, number: int,
-    deps: ProjectDeps = Depends(get_project_deps),
-) -> EventSourceResponse:
-    """Generate a chapter with SSE progress streaming."""
+def _spawn_write_worker(project_id: str, number: int, deps: ProjectDeps) -> None:
+    """Run Writer.write in a daemon thread; updates task_registry as it goes."""
+    import threading
 
-    async def event_stream():
-        task_registry.register(project_id, "write", number, "准备中…")
+    def _progress(msg: str) -> None:
+        task_registry.update(project_id, "write", msg, number)
+
+    def _run_write() -> None:
         try:
-            yield sse_progress("正在加载章节大纲…")
+            _progress("正在加载章节大纲…")
             ch = deps.outline.read_chapter(number)
             if ch is None:
-                yield sse_event("error", {"message": f"Chapter {number} has no outline"})
-                yield sse_done()
+                task_registry.publish(
+                    project_id, "write", number, "error", "Chapter has no outline"
+                )
+                task_registry.mark_finished(
+                    project_id, "write", number, error="无章节大纲"
+                )
                 return
 
-            yield sse_progress("正在组装上下文…")
-            # Run blocking code in a thread so we don't block the event loop.
-            context = await asyncio.to_thread(deps.assembler.assemble_for_chapter, ch)
-            yield sse_event("context", {
-                "preview": context.text[:500],
-                "codex_used": [e.id for e in context.codex_used],
-            })
+            _progress("正在组装上下文…")
+            # Preview is optional; writer will assemble again.
+            try:
+                context = deps.assembler.assemble_for_chapter(ch)
+                task_registry.publish(project_id, "write", number, "context", {
+                    "preview": context.text[:500],
+                    "codex_used": [e.id for e in context.codex_used],
+                })
+            except Exception:
+                pass
 
-            yield sse_progress("正在生成正文…")
-            result = await asyncio.to_thread(deps.writer.write, number)
+            def on_token(delta: str) -> None:
+                task_registry.append_stream(project_id, "write", number, delta)
 
-            yield sse_event("draft", {
+            result = deps.writer.write(
+                number, on_token=on_token, on_progress=_progress,
+            )
+
+            draft_text = ""
+            draft_path = Path(result.draft_path)
+            if draft_path.exists():
+                draft_text = draft_path.read_text(encoding="utf-8")
+                task_registry.set_stream(project_id, "write", number, draft_text)
+
+            task_registry.publish(project_id, "write", number, "draft", {
                 "path": result.draft_path,
                 "summary": result.summary,
                 "entities_tracked": result.entities_tracked,
                 "usage": result.usage,
+                "text": draft_text,
             })
 
-            # Enrichment results (auto codex expansion).
             if result.enrichment:
-                yield sse_progress("正在扩充设定集…")
-                yield sse_event("enrichment", {
+                _progress("正在扩充设定集…")
+                task_registry.publish(project_id, "write", number, "enrichment", {
                     "created": [
                         {"id": c.entity_id, "detail": c.detail}
                         for c in result.enrichment.entities_created
@@ -349,11 +380,10 @@ def write_chapter_sse(
                     "summary": result.enrichment.summary,
                 })
 
-            # Optional consistency check
             if deps.config.generation.auto_consistency_check:
-                yield sse_progress("正在校验一致性…")
-                report = await asyncio.to_thread(deps.checker.check, number)
-                yield sse_event("check", {
+                _progress("正在校验一致性…")
+                report = deps.checker.check(number)
+                task_registry.publish(project_id, "write", number, "check", {
                     "overall": report.overall,
                     "summary": report.summary,
                     "issues": [
@@ -368,29 +398,178 @@ def write_chapter_sse(
                     ],
                 })
 
-            yield sse_progress("完成！")
-            yield sse_done({"chapter": number})
-        except Exception as exc:
-            yield sse_event("error", {"message": str(exc)})
-            yield sse_done()
+            _progress("完成！")
+            task_registry.publish(
+                project_id, "write", number, "done", {"chapter": number}
+            )
+            task_registry.mark_finished(project_id, "write", number)
+        except Exception as exc:  # noqa: BLE001
+            task_registry.publish(project_id, "write", number, "error", str(exc))
+            task_registry.mark_finished(project_id, "write", number, error=str(exc))
         finally:
-            task_registry.unregister(project_id, "write", number)
+            def _delayed_cleanup() -> None:
+                time.sleep(90)
+                t = task_registry.get(project_id, "write", number)
+                if t is not None and t.finished:
+                    task_registry.unregister(project_id, "write", number)
 
-    return EventSourceResponse(event_stream())
+            threading.Thread(
+                target=_delayed_cleanup, name=f"write-cleanup-{number}", daemon=True
+            ).start()
+
+    threading.Thread(
+        target=_run_write, name=f"write-{project_id}-{number}", daemon=True
+    ).start()
 
 
-# ---- write status (polling fallback for reconnection) ----
+@router.post("/write/{number}/start")
+def start_write(
+    project_id: str, number: int,
+    deps: ProjectDeps = Depends(get_project_deps),
+) -> dict:
+    """Start chapter generation in a background thread (non-blocking).
+
+    Clients should poll ``GET /write-status/{number}`` for ``progress`` and
+    ``stream_text``. This avoids long-lived SSE connections that can stall
+    other API requests through some reverse proxies.
+    """
+    started = task_registry.try_start(project_id, "write", number, "准备中…")
+    if started:
+        _spawn_write_worker(project_id, number, deps)
+    t = task_registry.get(project_id, "write", number)
+    return {
+        "ok": True,
+        "started": started,
+        "active": t is not None and not t.finished,
+        "progress": t.progress if t else "",
+        "stream_text": t.stream_text if t else "",
+    }
+
+
+@router.get("/write/{number}")
+def write_chapter_sse(
+    project_id: str, number: int,
+    resume: bool = False,
+    deps: ProjectDeps = Depends(get_project_deps),
+) -> EventSourceResponse:
+    """Optional SSE attach for live tokens (prefer POST /start + write-status)."""
+    from queue import Empty
+
+    if not resume:
+        started = task_registry.try_start(project_id, "write", number, "准备中…")
+        if started:
+            _spawn_write_worker(project_id, number, deps)
+
+    sub = task_registry.subscribe(project_id, "write", number)
+    if sub is None:
+        async def no_job():
+            yield sse_event("error", {"message": "没有进行中的生成任务"})
+            yield sse_done()
+        return EventSourceResponse(no_job(), ping=10)
+
+    event_q, snapshot_text, snapshot_progress, already_finished = sub
+
+    def _emit(kind: str, payload: Any):
+        if kind == "__end__":
+            return None
+        if kind == "progress":
+            return sse_progress(str(payload))
+        if kind == "token":
+            return sse_event("token", {"text": payload})
+        if kind == "context":
+            return sse_event("context", payload)
+        if kind == "draft":
+            return sse_event("draft", payload)
+        if kind == "enrichment":
+            return sse_event("enrichment", payload)
+        if kind == "check":
+            return sse_event("check", payload)
+        if kind == "error":
+            return sse_event("error", {"message": payload})
+        if kind == "done":
+            return sse_done(payload if isinstance(payload, dict) else {"chapter": number})
+        return None
+
+    async def event_stream():
+        try:
+            if snapshot_text:
+                yield sse_event("token", {"text": snapshot_text, "replay": True})
+            if snapshot_progress:
+                yield sse_progress(snapshot_progress)
+            if already_finished:
+                t = task_registry.get(project_id, "write", number)
+                if t is not None and t.error:
+                    yield sse_event("error", {"message": t.error})
+                yield sse_done({"chapter": number})
+                return
+
+            while True:
+                try:
+                    kind, payload = await asyncio.to_thread(event_q.get, True, 0.25)
+                except Empty:
+                    t = task_registry.get(project_id, "write", number)
+                    if t is None or t.finished:
+                        yield sse_done({"chapter": number})
+                        return
+                    continue
+
+                if kind == "__end__":
+                    t = task_registry.get(project_id, "write", number)
+                    if t is not None and t.error:
+                        yield sse_event("error", {"message": t.error})
+                    yield sse_done({"chapter": number})
+                    return
+
+                evt = _emit(kind, payload)
+                if evt is not None:
+                    yield evt
+                if kind in ("done", "error"):
+                    if kind == "error":
+                        yield sse_done()
+                    return
+        except asyncio.CancelledError:
+            return
+        finally:
+            task_registry.unsubscribe(project_id, "write", number, event_q)
+
+    return EventSourceResponse(
+        event_stream(),
+        ping=10,
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ---- write status (primary UI update path) ----
 
 @router.get("/write-status/{number}")
 def write_status(project_id: str, number: int, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
     """Check if a write/revise is in progress for this chapter."""
     t = task_registry.get(project_id, "write", number) or task_registry.get(project_id, "revise", number)
     if t:
-        return {"active": True, "progress": t.progress, "started_at": t.started_at, "op": t.op}
+        active = not t.finished
+        return {
+            "active": active,
+            "finished": t.finished,
+            "progress": t.progress,
+            "stream_text": t.stream_text,
+            "error": t.error,
+            "started_at": t.started_at,
+            "op": t.op,
+            "draft_exists": deps.paths.draft_file(number).exists(),
+        }
     draft_path = deps.paths.draft_file(number)
     if draft_path.exists():
-        return {"active": False, "progress": "completed", "draft_exists": True, "op": ""}
-    return {"active": False, "progress": "", "draft_exists": False, "op": ""}
+        return {
+            "active": False, "finished": True, "progress": "completed",
+            "stream_text": "", "error": None, "draft_exists": True, "op": "",
+        }
+    return {
+        "active": False, "finished": False, "progress": "",
+        "stream_text": "", "error": None, "draft_exists": False, "op": "",
+    }
 
 
 # ---- all active tasks ----
@@ -401,8 +580,15 @@ def list_tasks(project_id: str) -> dict:
     tasks = task_registry.list_for_project(project_id)
     return {
         "tasks": [
-            {"op": t.op, "chapter": t.chapter, "started_at": t.started_at, "progress": t.progress}
+            {
+                "op": t.op,
+                "chapter": t.chapter,
+                "started_at": t.started_at,
+                "progress": t.progress,
+                "finished": t.finished,
+            }
             for t in tasks
+            if not t.finished
         ]
     }
 
@@ -529,6 +715,22 @@ def _serialize_section_list(section_list: list) -> list[dict]:
             d["sub_items"] = sec.sub_items
         result.append(d)
     return result
+
+
+def _is_runtime_versioned_rel(rel: str) -> bool:
+    """Paths that must not leak from live project into a regen fork.
+
+    Matches state/ (entities, threads, reviews), codex/, and story-so-far.
+    Excludes volume outlines (planning) and style.md (author-managed).
+    """
+    rel = rel.replace("\\", "/")
+    if rel.startswith("state/") or "/state/" in f"/{rel}":
+        return True
+    if rel.startswith("codex/") or "/codex/" in f"/{rel}":
+        return True
+    if rel == "outline/story_so_far.md":
+        return True
+    return False
 
 
 def _is_draft_ge(rel_path: str, number: int) -> bool:

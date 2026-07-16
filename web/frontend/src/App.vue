@@ -21,25 +21,25 @@
           <el-icon><DataAnalysis /></el-icon>
           <template #title>仪表盘</template>
         </el-menu-item>
-        <el-menu-item index="/codex">
-          <el-icon><Collection /></el-icon>
-          <template #title>设定集</template>
-        </el-menu-item>
         <el-menu-item index="/outline">
           <el-icon><Document /></el-icon>
-          <template #title>大纲</template>
+          <template #title>写作规划</template>
         </el-menu-item>
         <el-menu-item index="/writer">
           <el-icon><EditPen /></el-icon>
           <template #title>写作</template>
         </el-menu-item>
-        <el-menu-item index="/narrative">
-          <el-icon><Compass /></el-icon>
-          <template #title>叙事管理</template>
+        <el-menu-item index="/codex">
+          <el-icon><Collection /></el-icon>
+          <template #title>设定集</template>
         </el-menu-item>
         <el-menu-item index="/workflow">
           <el-icon><Connection /></el-icon>
           <template #title>工作流</template>
+        </el-menu-item>
+        <el-menu-item index="/llm-logs">
+          <el-icon><Tickets /></el-icon>
+          <template #title>LLM 日志</template>
         </el-menu-item>
         <el-menu-item index="/settings">
           <el-icon><Setting /></el-icon>
@@ -471,14 +471,17 @@ html, body, #app { margin: 0; padding: 0; height: 100%; }
 
 /* ===== Scrollbar in sidebar ===== */
 .app-menu::-webkit-scrollbar {
-  width: 4px;
+  width: 6px;
 }
 .app-menu::-webkit-scrollbar-track {
   background: transparent;
 }
 .app-menu::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 3px;
+}
+.app-menu::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.35);
 }
 
 /* ===== Server management in sidebar ===== */

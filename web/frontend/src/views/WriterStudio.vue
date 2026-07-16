@@ -7,7 +7,7 @@
           <el-icon class="title-icon"><EditPen /></el-icon>
           写作
         </h1>
-        <el-select v-model="chapterNum" placeholder="选择章节" class="chapter-select" @change="loadChapter">
+        <el-select v-model="chapterNum" placeholder="选择章节" class="chapter-select">
           <el-option v-for="c in chapterList" :key="c.number" :label="`第${c.number}章 ${c.title}`" :value="c.number" />
         </el-select>
         <el-tag v-if="currentBranch !== 'main'" type="warning" effect="dark" size="small" class="branch-tag">
@@ -234,7 +234,25 @@
             </div>
           </div>
           <div class="panel-content draft-content" :style="{ '--draft-font-size': draftFontSize + 'px' }">
+            <div v-if="writing" class="stream-status">
+              <el-icon class="is-loading"><Loading /></el-icon>
+              <span>{{ progressMsg || '正在生成…' }}</span>
+              <span v-if="draftText" class="stream-chars">已输出 {{ draftText.length }} 字</span>
+            </div>
+            <div v-else class="draft-toolbar-row">
+              <el-button size="small" text type="primary" @click="draftEditable = !draftEditable">
+                {{ draftEditable ? '完成编辑' : '手动编辑' }}
+              </el-button>
+            </div>
+            <!-- Streaming / default: readonly prose view (reliable live updates) -->
+            <pre
+              v-if="writing || !draftEditable"
+              ref="draftPreRef"
+              class="draft-readonly"
+              :class="{ 'is-streaming': writing, 'is-empty': !draftText }"
+            >{{ draftText || (writing ? '正文正在流式生成…' : '章节正文将显示在这里…') }}</pre>
             <el-input
+              v-else
               v-model="draftText"
               type="textarea"
               placeholder="章节正文将显示在这里…"
@@ -412,7 +430,36 @@ const store = useProjectStore()
 const chapterNum = ref<number | null>(null)
 const chapterList = ref<ChapterOutline[]>([])
 const draftText = ref('')
+const draftEditable = ref(false)
+const draftPreRef = ref<HTMLElement | null>(null)
 const contextText = ref('')
+let activeWriteHandle: { close: () => void } | null = null
+let statusPollTimer: ReturnType<typeof setInterval> | null = null
+/** Prevent double "生成完成" from SSE onDone + status poll. */
+const finishNotified = new Set<number>()
+
+function notifyWriteFinished(num: number, error?: string | null) {
+  if (finishNotified.has(num)) return
+  finishNotified.add(num)
+  // Allow re-notify on a later regenerate of the same chapter.
+  setTimeout(() => finishNotified.delete(num), 5000)
+  if (error) ElMessage.error(error)
+  else ElMessage.success('生成完成')
+}
+
+function scrollDraftToBottom() {
+  requestAnimationFrame(() => {
+    const el = draftPreRef.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+function stopStatusPoll() {
+  if (statusPollTimer) {
+    clearInterval(statusPollTimer)
+    statusPollTimer = null
+  }
+}
 const contextSource = ref<'write' | 'live' | ''>('')
 const contextViewMode = ref<'raw' | 'structured'>('structured')
 const collapsedSections = ref(new Set<number>())
@@ -514,11 +561,10 @@ function toggleSection(i: number) { collapsedSections.value.has(i) ? collapsedSe
 async function fetchChapterList() {
   if (!store.currentId) return
   chapterList.value = await listChapters(store.currentId)
-  // Auto-select the latest chapter on load
+  // Auto-select the latest chapter on load (watch → loadChapter).
   if (chapterList.value.length > 0 && !chapterNum.value) {
     const latest = chapterList.value.reduce((a, b) => a.number > b.number ? a : b)
     chapterNum.value = latest.number
-    loadChapter()
   }
 }
 
@@ -532,17 +578,51 @@ async function fetchBranchInfo() {
 
 async function loadChapter() {
   if (!store.currentId || !chapterNum.value) return
+  const num = chapterNum.value
   checkReport.value = null
   contextText.value = ''
   contextSource.value = ''
   contextSections.value = []
+
+  // If this chapter is mid-write, restore stream state — do NOT clobber with disk draft.
+  const localTask = store.writeTasks[num]
+  if (localTask?.active && localTask.stream_text) {
+    draftText.value = localTask.stream_text
+    writing.value = true
+    draftEditable.value = false
+    progressMsg.value = localTask.progress || '生成进行中…'
+  }
+
+  try {
+    const s = await getWriteStatus(store.currentId, num)
+    if (s.active) {
+      writing.value = true
+      draftEditable.value = false
+      progressMsg.value = s.progress || '生成进行中…'
+      if (s.stream_text) draftText.value = s.stream_text
+      store.startWriteTracking(num, {
+        progress: s.progress || '',
+        stream_text: s.stream_text || draftText.value,
+        active: true,
+      })
+      attachWriteStream(num, { resume: true })
+      return
+    }
+  } catch { /* fall through to normal draft load */ }
+
+  // Not writing — load persisted draft.
+  writing.value = false
   const [draft, ch] = await Promise.all([
-    getDraft(store.currentId, chapterNum.value),
+    getDraft(store.currentId, num),
     listChapters(store.currentId),
   ])
+  // Guard: chapter may have changed while we awaited.
+  if (chapterNum.value !== num) return
+  // Guard: a write may have started while we awaited.
+  if (store.writeTasks[num]?.active) return
+
   draftText.value = draft.text || ''
-  currentBeat.value = ch.find(c => c.number === chapterNum.value) || null
-  // Prefer write-time context when a draft exists.
+  currentBeat.value = ch.find(c => c.number === num) || null
   if (draftText.value) {
     await loadContext(false, true)
   }
@@ -564,11 +644,103 @@ async function loadContext(live: boolean = false, quiet: boolean = false) {
   }
 }
 
+/** Attach (or re-attach) to the chapter write SSE stream. */
+function attachWriteStream(num: number, opts?: { resume?: boolean; clearDraft?: boolean }) {
+  if (!store.currentId) return
+
+  writing.value = true
+  draftEditable.value = false
+  if (opts?.clearDraft) draftText.value = ''
+  if (!opts?.resume) progressMsg.value = '连接中…'
+
+  store.startWriteTracking(num, {
+    stream_text: opts?.clearDraft ? '' : (draftText.value || store.writeTasks[num]?.stream_text || ''),
+    progress: progressMsg.value,
+  })
+  startStatusPoll(num)
+
+  let streamed = !!(draftText.value)
+  activeWriteHandle?.close()
+  activeWriteHandle = writeChapterSSE(store.currentId, num, {
+    onProgress: (msg) => {
+      if (chapterNum.value !== num) return
+      progressMsg.value = msg
+      store.startWriteTracking(num, { progress: msg })
+    },
+    onContext: (data) => {
+      if (chapterNum.value !== num) return
+      contextText.value = (data as any).preview || ''
+      contextSections.value = []
+      contextSource.value = 'live'
+    },
+    onToken: (text, meta) => {
+      if (chapterNum.value !== num) {
+        // Still buffer into store so switching back is instant.
+        store.updateWriteStream(num, text, { replace: !!meta?.replay })
+        return
+      }
+      if (!streamed) {
+        streamed = true
+        progressMsg.value = '正在流式输出正文…'
+      }
+      if (meta?.replay) {
+        draftText.value = text
+        store.updateWriteStream(num, text, { replace: true, progress: progressMsg.value })
+      } else {
+        draftText.value += text
+        store.updateWriteStream(num, text, { progress: progressMsg.value })
+      }
+      scrollDraftToBottom()
+    },
+    onDraft: async (data) => {
+      if (chapterNum.value !== num) return
+      const finalText = (data as any)?.text
+      if (typeof finalText === 'string' && finalText.trim()) {
+        draftText.value = finalText
+        store.updateWriteStream(num, finalText, { replace: true })
+      }
+      progressMsg.value = '草稿已生成，正在后处理…'
+    },
+    onCheck: (data) => {
+      if (chapterNum.value !== num) return
+      checkReport.value = data as any
+    },
+    onEnrichment: (data) => {
+      if (chapterNum.value !== num) return
+      enrichmentResult.value = data as any
+    },
+    onError: (msg) => {
+      if (msg.includes('正在生成中') || msg.includes('没有进行中的生成任务')) {
+        // No live SSE — keep polling write-status.
+        if (!opts?.resume) ElMessage.warning(msg)
+        startStatusPoll(num)
+        return
+      }
+      if (chapterNum.value === num) {
+        ElMessage.error(msg)
+        writing.value = false
+        progressMsg.value = ''
+      }
+      stopStatusPoll()
+      store.stopWriteTracking(num)
+    },
+    onDone: async () => {
+      stopStatusPoll()
+      store.stopWriteTracking(num)
+      if (chapterNum.value !== num) return
+      writing.value = false
+      progressMsg.value = ''
+      await loadChapter()
+      notifyWriteFinished(num)
+    },
+  }, { resume: !!opts?.resume })
+}
+
 async function doWrite() {
   if (!store.currentId || !chapterNum.value) return
 
   // If draft already exists, confirm before overwriting.
-  if (draftText.value) {
+  if (draftText.value && !writing.value) {
     // Check whether subsequent chapters also have drafts.
     let hasSubsequent = false
     try {
@@ -646,53 +818,54 @@ async function doWrite() {
     }
   }
 
-  // --- Normal write flow (SSE) ---
-  writing.value = true
-  progressMsg.value = '连接中…'
+  // --- Normal write flow (SSE + token stream) ---
   checkReport.value = null
+  enrichmentResult.value = null
+  finishNotified.delete(chapterNum.value)
+  attachWriteStream(chapterNum.value, { clearDraft: true })
+}
 
-  // Register in store so navigation away doesn't lose track.
-  store.startWriteTracking(chapterNum.value)
-
-  // Use SSE for streaming progress
-  const es = writeChapterSSE(store.currentId, chapterNum.value, {
-    onProgress: (msg) => {
-      progressMsg.value = msg
-      store.writeTasks[chapterNum.value!] = {
-        ...store.writeTasks[chapterNum.value!],
-        progress: msg,
+function startStatusPoll(num: number) {
+  stopStatusPoll()
+  statusPollTimer = setInterval(async () => {
+    if (!store.currentId) return
+    try {
+      const st = await getWriteStatus(store.currentId, num)
+      if (st.progress) progressMsg.value = st.progress
+      if (st.stream_text && chapterNum.value === num) {
+        // Prefer longer text to avoid flicker if SSE is ahead of poll.
+        if (st.stream_text.length >= draftText.value.length) {
+          draftText.value = st.stream_text
+          scrollDraftToBottom()
+        }
+        store.updateWriteStream(num, st.stream_text, {
+          replace: true,
+          progress: st.progress || progressMsg.value,
+        })
       }
-    },
-    onContext: (data) => {
-      // Transient preview during generation; full write-time snapshot loads on done.
-      contextText.value = (data as any).preview || ''
-      contextSections.value = []
-      contextSource.value = 'live'
-    },
-    onDraft: async (_data) => {
-      draftText.value = '' // will reload below
-      progressMsg.value = '草稿已生成'
-    },
-    onCheck: (data) => {
-      checkReport.value = data as any
-    },
-    onEnrichment: (data) => {
-      enrichmentResult.value = data as any
-    },
-    onError: (msg) => {
-      ElMessage.error(msg)
-      writing.value = false
-      progressMsg.value = ''
-      store.stopWriteTracking(chapterNum.value!)
-    },
-    onDone: async () => {
-      writing.value = false
-      progressMsg.value = ''
-      store.stopWriteTracking(chapterNum.value!)
-      await loadChapter()
-      ElMessage.success('生成完成')
-    },
-  })
+      if (st.error && st.finished) {
+        stopStatusPoll()
+        writing.value = false
+        store.stopWriteTracking(num)
+        notifyWriteFinished(num, st.error)
+        return
+      }
+      if (!st.active) {
+        stopStatusPoll()
+        writing.value = false
+        progressMsg.value = ''
+        store.stopWriteTracking(num)
+        if (chapterNum.value === num) {
+          await loadChapter()
+          if (st.draft_exists || st.finished) {
+            notifyWriteFinished(num)
+          }
+        }
+      } else {
+        writing.value = true
+      }
+    } catch { /* keep polling */ }
+  }, 800)
 }
 
 async function doCheck() {
@@ -736,47 +909,45 @@ async function saveDraft() {
 onMounted(() => {
   fetchChapterList()
   fetchBranchInfo()
+  store.checkPendingTasks()
 })
 
-// Check for active writes when entering this page (may have navigated away and back).
-async function checkActiveWrite() {
-  if (!store.currentId || !chapterNum.value) return
-  const num = chapterNum.value
-  try {
-    const s = await getWriteStatus(store.currentId, num)
-    if (s.active) {
-      writing.value = true
-      progressMsg.value = s.progress
-      store.startWriteTracking(num)
-      // Poll until done.
-      const poll = setInterval(async () => {
-        try {
-          const st = await getWriteStatus(store.currentId!, num)
-          if (st.active) {
-            progressMsg.value = st.progress
-          } else {
-            clearInterval(poll)
-            writing.value = false
-            progressMsg.value = ''
-            store.stopWriteTracking(num)
-            await loadChapter()
-            if (st.draft_exists) {
-              ElMessage.success('生成完成（已在后台完成）')
-            }
-          }
-        } catch { /* keep polling */ }
-      }, 3000)
-    }
-  } catch { /* ignore */ }
+// Run check when chapter changes (covers enter-page after auto-select too).
+watch(chapterNum, (num) => {
+  stopStatusPoll()
+  activeWriteHandle?.close()
+  activeWriteHandle = null
+  if (num) {
+    loadChapter()
+  }
+})
+
+onUnmounted(() => {
+  // Do not abort the server job — only close the local SSE reader.
+  // Keep Pinia writeTasks + store poll so other pages / remount can resume.
+  activeWriteHandle?.close()
+  activeWriteHandle = null
+  stopStatusPoll()
+})
+
+function onWriteComplete(e: Event) {
+  const detail = (e as CustomEvent).detail as { chapter: number; draft_exists?: boolean; error?: string }
+  if (!detail || detail.chapter !== chapterNum.value) return
+  writing.value = false
+  progressMsg.value = ''
+  stopStatusPoll()
+  if (detail.error) {
+    notifyWriteFinished(detail.chapter, detail.error)
+  } else {
+    loadChapter()
+    notifyWriteFinished(detail.chapter)
+  }
 }
-
-// Run check when chapter changes.
-watch(chapterNum, () => {
-  if (chapterNum.value) checkActiveWrite()
-})
-// Also check on first mount.
 onMounted(() => {
-  if (chapterNum.value) checkActiveWrite()
+  window.addEventListener('write-complete', onWriteComplete)
+})
+onUnmounted(() => {
+  window.removeEventListener('write-complete', onWriteComplete)
 })
 </script>
 
@@ -1227,6 +1398,64 @@ onMounted(() => {
   overflow: hidden; /* prevent outer scrollbar; textarea scrolls */
   display: flex;
   flex-direction: column;
+}
+
+.stream-status {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--rb-primary);
+  background: rgba(99, 102, 241, 0.08);
+  border-bottom: 1px solid rgba(99, 102, 241, 0.15);
+}
+
+.stream-chars {
+  margin-left: auto;
+  color: var(--rb-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.draft-toolbar-row {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-end;
+  padding: 4px 12px 0;
+}
+
+.draft-readonly {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 20px 24px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--draft-font-size, 16px);
+  line-height: 1.9;
+  font-family: var(--rb-font);
+  color: var(--rb-text-primary);
+  background: transparent;
+}
+
+.draft-readonly.is-empty {
+  color: var(--rb-text-muted);
+}
+
+.draft-readonly.is-streaming::after {
+  content: '▍';
+  display: inline-block;
+  width: 0.55em;
+  margin-left: 2px;
+  color: var(--rb-primary);
+  animation: caret-blink 1s step-end infinite;
+}
+
+@keyframes caret-blink {
+  50% { opacity: 0; }
 }
 
 .draft-editor {

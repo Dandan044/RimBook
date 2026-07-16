@@ -79,7 +79,7 @@ export const STAGES: Record<string, StageMeta> = {
     id: 'checker',
     nameZh: '一致性校验器',
     nameEn: 'Checker',
-    description: '对已生成的章节正文进行 LLM 驱动的一致性审计（人物/设定/剧情/事实），可自动修复。发现 blocking issue 则调用 Writer.revise 修订并重新校验（最多 N 轮）。',
+    description: '对已生成的章节正文进行 LLM 驱动的一致性审计（八维：人物/设定/剧情/事实/逻辑/数值/常识/因果），可自动修复。发现 blocking issue 则调用 Writer.apply_minimal_fix 定点修复并重新校验（最多 N 轮）。',
     reads: [
       { source: 'drafts/chN.md', desc: '待校验的章节正文' },
     ],
@@ -87,7 +87,7 @@ export const STAGES: Record<string, StageMeta> = {
       { target: 'CheckReport', desc: '校验报告：issues 列表、严重程度、证据、建议、修订后的文本' },
       { target: 'drafts/chN.md', desc: '（auto-fix 时）修订后的正文' },
     ],
-    llmPrompts: ['checker_system + checker_user', '（auto-fix 时）writer_revise_system + writer_revise_user'],
+    llmPrompts: ['checker_system + checker_user', '（auto-fix 时）fix_system + fix_user'],
   },
 }
 

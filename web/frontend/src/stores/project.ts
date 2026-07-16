@@ -11,28 +11,55 @@ import {
   type ProjectStatus,
 } from '../api'
 
+export interface WriteTaskState {
+  started_at: string
+  progress: string
+  stream_text: string
+  active: boolean
+}
+
 export const useProjectStore = defineStore('project', () => {
   const projects = ref<ProjectInfo[]>([])
   const currentId = ref<string>('')
   const status = ref<ProjectStatus | null>(null)
   const loading = ref(false)
 
-  // Track active write tasks (survives page navigation).
-  const writeTasks = ref<Record<number, { started_at: string; progress: string }>>({})
+  // Track active write tasks (survives page navigation within the SPA).
+  const writeTasks = ref<Record<number, WriteTaskState>>({})
   const writeTaskTimer = ref<ReturnType<typeof setInterval> | null>(null)
 
   const currentProject = computed(() =>
     projects.value.find(p => p.id === currentId.value)
   )
 
-  function startWriteTracking(chapterNum: number) {
+  function startWriteTracking(chapterNum: number, seed?: Partial<WriteTaskState>) {
+    const prev = writeTasks.value[chapterNum]
     writeTasks.value = {
       ...writeTasks.value,
-      [chapterNum]: { started_at: new Date().toISOString(), progress: '准备中…' },
+      [chapterNum]: {
+        started_at: seed?.started_at || prev?.started_at || new Date().toISOString(),
+        progress: seed?.progress || prev?.progress || '准备中…',
+        stream_text: seed?.stream_text ?? prev?.stream_text ?? '',
+        active: seed?.active ?? true,
+      },
     }
-    // Poll for status every 3 seconds.
     if (!writeTaskTimer.value) {
-      writeTaskTimer.value = setInterval(pollWriteStatus, 3000)
+      writeTaskTimer.value = setInterval(pollWriteStatus, 2000)
+    }
+  }
+
+  function updateWriteStream(chapterNum: number, text: string, opts?: { replace?: boolean; progress?: string }) {
+    const prev = writeTasks.value[chapterNum]
+    if (!prev) return
+    const stream_text = opts?.replace ? text : (prev.stream_text + text)
+    writeTasks.value = {
+      ...writeTasks.value,
+      [chapterNum]: {
+        ...prev,
+        stream_text,
+        progress: opts?.progress || prev.progress,
+        active: true,
+      },
     }
   }
 
@@ -51,11 +78,21 @@ export const useProjectStore = defineStore('project', () => {
       try {
         const s = await getWriteStatus(currentId.value, num)
         if (s.active) {
-          writeTasks.value[num].progress = s.progress
+          const prev = writeTasks.value[num]
+          writeTasks.value = {
+            ...writeTasks.value,
+            [num]: {
+              started_at: prev?.started_at || s.started_at || new Date().toISOString(),
+              progress: s.progress || prev?.progress || '',
+              stream_text: s.stream_text || prev?.stream_text || '',
+              active: true,
+            },
+          }
         } else {
           stopWriteTracking(num)
-          // Trigger a draft reload event.
-          window.dispatchEvent(new CustomEvent('write-complete', { detail: { chapter: num, draft_exists: s.draft_exists } }))
+          window.dispatchEvent(new CustomEvent('write-complete', {
+            detail: { chapter: num, draft_exists: s.draft_exists, error: s.error },
+          }))
         }
       } catch {
         // backend may be restarting; keep polling
@@ -70,10 +107,19 @@ export const useProjectStore = defineStore('project', () => {
       const s = await getTasks(currentId.value)
       for (const t of s.tasks) {
         if (t.chapter !== null && (t.op === 'write' || t.op === 'revise' || t.op === 'check')) {
-          writeTasks.value = {
-            ...writeTasks.value,
-            [t.chapter]: { started_at: t.started_at, progress: t.progress },
-          }
+          // Prefer write-status for stream_text when available.
+          let stream_text = writeTasks.value[t.chapter]?.stream_text || ''
+          try {
+            const st = await getWriteStatus(currentId.value, t.chapter)
+            if (st.stream_text) stream_text = st.stream_text
+            if (!st.active) continue
+          } catch { /* use task list info */ }
+          startWriteTracking(t.chapter, {
+            started_at: t.started_at,
+            progress: t.progress,
+            stream_text,
+            active: true,
+          })
         }
       }
     } catch { /* no-op */ }
@@ -120,6 +166,6 @@ export const useProjectStore = defineStore('project', () => {
   return {
     projects, currentId, status, loading, currentProject, writeTasks,
     fetchProjects, createNew, removeProject, fetchStatus, selectProject,
-    startWriteTracking, stopWriteTracking, checkPendingTasks,
+    startWriteTracking, stopWriteTracking, updateWriteStream, checkPendingTasks,
   }
 })

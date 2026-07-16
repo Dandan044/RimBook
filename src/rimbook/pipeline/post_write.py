@@ -145,8 +145,10 @@ class PostWritePipeline:
         entity_ids = [_strip_new_prefix(eid) for eid in entity_ids]
         try:
             if entity_ids:
+                entity_states_text = _format_entity_states(self.entity_state, entity_ids)
                 deltas = self.summarizer.extract_entity_deltas(
                     number, draft_text, entity_ids, codex=self.codex,
+                    entity_states_text=entity_states_text,
                 )
                 Summarizer.apply_deltas(deltas, self.entity_state, number)
         except Exception as exc:  # pragma: no cover
@@ -662,6 +664,41 @@ def _format_existing_codex(
             lines.append("（档案为空）")
         lines.append("")
     return "\n".join(lines)
+
+
+def _format_entity_states(store: EntityStateStore, entity_ids: list[str]) -> str:
+    """Format current entity states as context for the delta-extraction prompt.
+
+    Lets the model judge real deltas against existing state rather than
+    guessing from prose alone — reducing hallucinated or duplicated state.
+    """
+    try:
+        states = store.get_many(entity_ids)
+    except Exception:
+        return ""
+    if not states:
+        return ""
+    lines = ["--- 各实体当前状态（请对照判断「本章真实变化」，勿全量重述）---"]
+    for s in states:
+        parts = [f"  {s.entity_id}："]
+        if s.location:
+            parts.append(f"位置={s.location}")
+        if s.status:
+            parts.append(f"状态={s.status}")
+        if s.possessions:
+            items = "、".join(
+                p.item + (f"×{p.quantity}" if p.quantity else "")
+                for p in s.possessions
+            )
+            parts.append(f"持有=[{items}]")
+        if s.knowledge:
+            facts = "；".join(k.fact for k in s.knowledge[:8])
+            parts.append(f"已知=[{facts}]")
+        if s.relationships:
+            rels = "；".join(f"{k}:{v}" for k, v in s.relationships.items())
+            parts.append(f"关系={{{rels}}}")
+        lines.append(" ".join(parts))
+    return "\n".join(lines) + "\n\n"
 
 
 def _strip_new_prefix(eid: str) -> str:

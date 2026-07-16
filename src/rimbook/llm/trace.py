@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from .client import GenerationResult, Message
+from .client import GenerationResult, JsonResult, Message
 
 __all__ = ["TraceStore", "LLMTrace", "NULL_TRACE"]
 
@@ -170,9 +170,12 @@ class LLMTrace:
             record["usage"] = result.usage
             record["response"] = result.content
         elif isinstance(result, dict):
-            # generate_json already parsed — keep both? we have no raw, but
-            # keep the parsed JSON so the trace still shows what was parsed.
-            record["response"] = json.dumps(result, ensure_ascii=False, default=str)
+            # generate_json returns JsonResult (dict subclass) with .usage.
+            record["response"] = json.dumps(dict(result), ensure_ascii=False, default=str)
+            if isinstance(result, JsonResult) and result.usage:
+                record["usage"] = result.usage
+                if result.model and not record.get("model"):
+                    record["model"] = result.model
         elif isinstance(result, str):
             record["model"] = ""
             record["response"] = result

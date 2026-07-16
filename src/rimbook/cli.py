@@ -760,10 +760,17 @@ def style_generate(
         f"--- 第 {ch.number} 章节选 ---\n{ch.text[:3000]}" for ch in recent
     )
     console.print(f"[cyan]正在从 {len(recent)} 章样本提炼风格指南…[/cyan]")
+    synopsis = ""
+    try:
+        synopsis = deps.outline.read_synopsis().strip()
+    except Exception:
+        synopsis = ""
     messages = deps.llm.as_chat(
         system=deps.prompts.style_generate_system,
         user=deps.prompts.style_generate_user.format(
-            title=deps.config.title, samples=samples,
+            title=deps.config.title,
+            samples=samples,
+            synopsis=synopsis or "（无）",
         ),
     )
     with deps.trace.begin("style", project=deps.project_dir.name) as t:
@@ -904,11 +911,17 @@ def review(
         samples.append(block)
     prose_samples = "\n\n".join(samples) or "（无正文抽样）"
 
+    synopsis = ""
+    try:
+        synopsis = deps.outline.read_synopsis().strip()
+    except Exception:
+        synopsis = ""
     console.print(f"[cyan]正在宏观审阅 {scope}（{len(chapters)} 章）…[/cyan]")
     messages = deps.llm.as_chat(
         system=deps.prompts.macro_review_system,
         user=deps.prompts.macro_review_user.format(
-            scope=scope, chapter_digest=digest, prose_samples=prose_samples,
+            scope=scope, synopsis=synopsis or "（暂无全书梗概）",
+            chapter_digest=digest, prose_samples=prose_samples,
         ),
     )
     with deps.trace.begin("macro_review", project=deps.project_dir.name) as t:

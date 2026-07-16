@@ -92,7 +92,9 @@ class LLMConfig(BaseModel):
     api_key: str | None = None
     model: str = "gpt-4o"
     check_model: str | None = None
-    reasoning_effort: str | None = None  # "low" | "medium" | "high" | None
+    # None → disable thinking (DeepSeek V4 defaults to thinking-on).
+    # Set to enable reasoning mode ("low" | "medium" | "high" | "max").
+    reasoning_effort: str | None = None
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
 
     @property

@@ -127,6 +127,120 @@ def _kill_process(pid: int) -> bool:
         return False
 
 
+def _find_all_rimbook_pids() -> list[int]:
+    """Find every OS process currently running the RimBook web server.
+
+    Scans running processes by command line (looking for the ``rimbook.web``
+    module invocation) instead of trusting only the tracked PID file. This
+    catches orphaned/stray instances left behind by a previous crash, a
+    forced shutdown, or repeated launches on different days/ports — exactly
+    the scenario that once caused a two-day-old process to keep silently
+    serving stale code while every restart via the tracked PID file appeared
+    to succeed.
+    """
+    pids: list[int] = []
+
+    try:
+        import psutil
+
+        for p in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                name = (p.info.get("name") or "").lower()
+                if "python" not in name:
+                    continue
+                cmdline = " ".join(p.info.get("cmdline") or [])
+            except Exception:
+                continue
+            if "rimbook.web" in cmdline or "rimbook-web" in cmdline:
+                pids.append(p.info["pid"])
+        return pids
+    except ImportError:
+        pass
+
+    if sys.platform == "win32":
+        try:
+            result = subprocess.run(
+                [
+                    "powershell", "-NoProfile", "-NonInteractive", "-Command",
+                    "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
+                    "| ForEach-Object { \"$($_.ProcessId)|$($_.CommandLine)\" }",
+                ],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=10,
+            )
+            for line in result.stdout.splitlines():
+                pid_str, sep, cmdline = line.partition("|")
+                if not sep:
+                    continue
+                if "rimbook.web" in cmdline or "rimbook-web" in cmdline:
+                    try:
+                        pids.append(int(pid_str.strip()))
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["pgrep", "-f", "rimbook.web"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in result.stdout.splitlines():
+                line = line.strip()
+                if line.isdigit():
+                    pids.append(int(line))
+        except Exception:
+            pass
+
+    return pids
+
+
+def kill_all_rimbook_processes(*, exclude_pid: int | None = None) -> int:
+    """Kill every RimBook server process found on this machine, tracked or not.
+
+    Unlike :func:`stop_server` (which only stops the PID recorded in
+    ``server.pid``), this scans the full process list so stray instances from
+    previous days/crashes are cleaned up too. Returns the number of processes
+    killed. Safe to call when nothing is running (returns ``0``).
+    """
+    my_pid = os.getpid()
+    pids = [
+        pid for pid in set(_find_all_rimbook_pids())
+        if pid != my_pid and pid != exclude_pid
+    ]
+    if not pids:
+        _delete_pid_files()
+        return 0
+
+    for pid in pids:
+        _kill_process(pid)
+
+    deadline = time.time() + _STOP_WAIT_SEC
+    while any(_is_process_running(pid) for pid in pids) and time.time() < deadline:
+        time.sleep(0.3)
+
+    # Anything still alive after the graceful wait gets force-killed.
+    for pid in pids:
+        if not _is_process_running(pid):
+            continue
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/PID", str(pid), "/T"],
+                    capture_output=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            else:
+                os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+    _delete_pid_files()
+    return len(pids)
+
+
 # ---------------------------------------------------------------------------
 # Port helpers
 # ---------------------------------------------------------------------------
@@ -191,6 +305,7 @@ def start_server(
     *,
     open_browser: bool = True,
     host: str = "127.0.0.1",
+    force_restart: bool = False,
 ) -> dict[str, Any]:
     """Launch the RimBook web server as a background process.
 
@@ -207,18 +322,31 @@ def start_server(
         server's URL after a short warm-up delay.
     host:
         Bind address (default ``127.0.0.1``).
+    force_restart:
+        When ``True``, unconditionally kill *every* RimBook server process
+        found on this machine (see :func:`kill_all_rimbook_processes`) before
+        launching a fresh one — even ones not tracked by the PID file (e.g.
+        orphaned from a previous crash or a launch on a different day). This
+        guarantees the shortcut always runs the current code instead of
+        silently reusing a stale, long-running process. Default ``False``
+        preserves the old "reuse if already running" behavior for callers
+        (like the in-app restart button) that manage the process lifecycle
+        themselves.
 
     Returns
     -------
     dict
         ``{"running": True, "pid": <int>, "port": <int>, "url": "<str>"}``
     """
-    # If already running, return existing info.
-    existing = get_server_status()
-    if existing["running"]:
-        if open_browser and existing["url"]:
-            webbrowser.open(existing["url"])
-        return existing
+    if force_restart:
+        kill_all_rimbook_processes()
+    else:
+        # If already running, return existing info.
+        existing = get_server_status()
+        if existing["running"]:
+            if open_browser and existing["url"]:
+                webbrowser.open(existing["url"])
+            return existing
 
     # Pick a port.
     if port is None:

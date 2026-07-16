@@ -67,11 +67,23 @@ class Summarizer:
 
     def summarize(self, chapter_number: int, chapter_text: str) -> str:
         """Generate and persist a summary for a written chapter."""
+        beat_block = ""
+        try:
+            ch = self.outline.read_chapter(chapter_number)
+            if ch and ch.beats:
+                goals = "; ".join(b.goal for b in ch.beats)
+                beat_block = (
+                    f"本章计划 beat（摘要应对照计划与实际，"
+                    f"若正文偏离计划请在摘要中注明）：{goals}\n\n"
+                )
+        except Exception:
+            beat_block = ""
         messages = self.llm.as_chat(
             system=self.prompts.summarize_system,
             user=self.prompts.summarize_user.format(
                 chapter_number=chapter_number,
                 chapter_text=chapter_text,
+                beat_block=beat_block,
             ),
         )
         with self.trace.begin(
@@ -179,6 +191,7 @@ class Summarizer:
         entity_ids: list[str],
         *,
         codex=None,
+        entity_states_text: str = "",
     ) -> list[EntityDelta]:
         """Ask the model how each entity's state changed during the chapter.
 
@@ -194,6 +207,7 @@ class Summarizer:
                 chapter_number=chapter_number,
                 chapter_text=chapter_text,
                 entity_ids=entity_ids,
+                entity_states_block=entity_states_text,
             ),
         )
         with self.trace.begin(

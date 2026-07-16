@@ -25,7 +25,7 @@ class Issue:
     """One inconsistency flagged by the checker."""
 
     severity: str  # high | medium | low
-    category: str  # setting | character | plot | fact
+    category: str  # setting | character | plot | fact | logic | numeric | commonsense
     description: str
     evidence: str = ""
     suggestion: str = ""

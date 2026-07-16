@@ -12,6 +12,7 @@ A thin wrapper around the ``openai`` SDK that:
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -20,7 +21,7 @@ from pydantic import BaseModel
 
 from ..config import LLMConfig
 
-__all__ = ["LLMClient", "Message", "GenerationResult"]
+__all__ = ["LLMClient", "Message", "GenerationResult", "JsonResult"]
 
 
 # Convenient message alias. Roles: "system" | "user" | "assistant".
@@ -34,6 +35,27 @@ class GenerationResult:
     content: str
     model: str
     usage: dict[str, int]  # {"prompt_tokens", "completion_tokens", "total_tokens"}
+
+
+class JsonResult(dict):
+    """Parsed JSON object that still carries API ``usage`` for tracing.
+
+    Behaves like a plain ``dict`` for all business callers; TraceStore reads
+    the ``usage`` attribute without polluting the JSON payload.
+    """
+
+    __slots__ = ("usage", "model")
+
+    def __init__(
+        self,
+        data: dict[str, Any],
+        *,
+        usage: dict[str, int] | None = None,
+        model: str = "",
+    ) -> None:
+        super().__init__(data)
+        self.usage = usage or {}
+        self.model = model
 
 
 class LLMClient:
@@ -61,6 +83,71 @@ class LLMClient:
     # ------------------------------------------------------------------
     # Chat completions
     # ------------------------------------------------------------------
+    def _completion_kwargs(
+        self,
+        messages: list[Message],
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        stream: bool = False,
+    ) -> dict[str, Any]:
+        """Build chat.completions.create kwargs for OpenAI-compatible APIs.
+
+        DeepSeek V4 enables thinking by default; when ``reasoning_effort`` is
+        unset we explicitly disable it so prose streams via ``delta.content``
+        instead of sitting behind ``reasoning_content``.
+        """
+        used_model = model or self._config.model
+        kwargs: dict[str, Any] = dict(
+            model=used_model,
+            messages=messages,  # type: ignore[arg-type]
+        )
+        reasoning = self._config.reasoning_effort
+        if reasoning:
+            kwargs["reasoning_effort"] = reasoning
+            # DeepSeek OpenAI-format toggle (ignored by providers that lack it).
+            kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
+        else:
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+        # Reasoning / thinking models often reject temperature / top_p.
+        if temperature is not None and not reasoning:
+            kwargs["temperature"] = temperature
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        if top_p is not None and not reasoning:
+            kwargs["top_p"] = top_p
+        if stop is not None:
+            kwargs["stop"] = stop
+        if stream:
+            kwargs["stream"] = True
+            kwargs["stream_options"] = {"include_usage": True}
+        return kwargs
+
+    def _create_completion(self, kwargs: dict[str, Any]) -> Any:
+        """Create a completion, stripping unsupported vendor params on failure.
+
+        Never silently drop ``thinking: disabled`` — DeepSeek V4 defaults to
+        thinking on, which parks prose in ``reasoning_content`` and breaks
+        live token streaming into the draft.
+        """
+        try:
+            return self._client.chat.completions.create(**kwargs)
+        except Exception:
+            pass
+        # Older SDKs / proxies may reject stream_options; keep extra_body.
+        attempt = dict(kwargs)
+        attempt.pop("stream_options", None)
+        try:
+            return self._client.chat.completions.create(**attempt)
+        except Exception:
+            pass
+        # Only if the provider rejects extra_body itself, retry without it.
+        attempt.pop("extra_body", None)
+        return self._client.chat.completions.create(**attempt)
+
     def generate(
         self,
         messages: list[Message],
@@ -73,25 +160,16 @@ class LLMClient:
     ) -> GenerationResult:
         """Run a chat completion and return the assistant text + usage."""
         used_model = model or self._config.model
-        kwargs: dict[str, Any] = dict(
+        kwargs = self._completion_kwargs(
+            messages,
             model=used_model,
-            messages=messages,  # type: ignore[arg-type]
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            stream=False,
         )
-        # When reasoning_effort is set, the model operates in reasoning mode.
-        # Most reasoning models (DeepSeek-R, OpenAI o1/o3, etc.) do not accept
-        # temperature / top_p — skip them to avoid API errors.
-        reasoning = self._config.reasoning_effort
-        if reasoning:
-            kwargs["reasoning_effort"] = reasoning
-        if temperature is not None and not reasoning:
-            kwargs["temperature"] = temperature
-        if max_tokens is not None:
-            kwargs["max_tokens"] = max_tokens
-        if top_p is not None and not reasoning:
-            kwargs["top_p"] = top_p
-        if stop is not None:
-            kwargs["stop"] = stop
-        resp = self._client.chat.completions.create(**kwargs)
+        resp = self._create_completion(kwargs)
         choice = resp.choices[0]
         content = choice.message.content or ""
         usage = {}
@@ -102,6 +180,78 @@ class LLMClient:
                 "total_tokens": resp.usage.total_tokens,
             }
         return GenerationResult(content=content, model=used_model, usage=usage)
+
+    def generate_stream(
+        self,
+        messages: list[Message],
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        stop: list[str] | None = None,
+        on_token: Callable[[str], None] | None = None,
+        on_reasoning: Callable[[str], None] | None = None,
+    ) -> GenerationResult:
+        """Stream a chat completion, optionally invoking *on_token* per delta.
+
+        Only ``delta.content`` (final prose) is collected and forwarded to
+        *on_token*. Optional *on_reasoning* receives ``reasoning_content``
+        deltas when thinking mode is on — never written into the draft.
+
+        Returns the same :class:`GenerationResult` shape as :meth:`generate`
+        once the stream finishes. Usage may be empty if the provider omits it
+        on streaming responses.
+        """
+        used_model = model or self._config.model
+        kwargs = self._completion_kwargs(
+            messages,
+            model=used_model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            stop=stop,
+            stream=True,
+        )
+
+        parts: list[str] = []
+        usage: dict[str, int] = {}
+        stream = self._create_completion(kwargs)
+
+        for chunk in stream:
+            if getattr(chunk, "usage", None) is not None and chunk.usage is not None:
+                usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens or 0,
+                    "completion_tokens": chunk.usage.completion_tokens or 0,
+                    "total_tokens": chunk.usage.total_tokens or 0,
+                }
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = choices[0].delta
+            # Thinking traces — progress only, never draft text.
+            reason_piece = getattr(delta, "reasoning_content", None) or ""
+            if reason_piece and on_reasoning is not None:
+                try:
+                    on_reasoning(reason_piece)
+                except Exception:
+                    pass
+
+            piece = getattr(delta, "content", None) or getattr(delta, "text", None) or ""
+            if not piece:
+                continue
+            parts.append(piece)
+            if on_token is not None:
+                try:
+                    on_token(piece)
+                except Exception:
+                    pass
+
+        return GenerationResult(
+            content="".join(parts),
+            model=used_model,
+            usage=usage,
+        )
 
     def generate_json(
         self,
@@ -126,7 +276,10 @@ class LLMClient:
             model=model,
             temperature=0.0 if temperature is None else temperature,
         )
-        return _extract_json(result.content)
+        data = _extract_json(result.content)
+        if not isinstance(data, dict):
+            raise ValueError("模型未返回 JSON 对象")
+        return JsonResult(data, usage=result.usage, model=result.model)
 
     # ------------------------------------------------------------------
     # Embeddings

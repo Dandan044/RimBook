@@ -254,55 +254,132 @@ export const regenerateSummary = (projectId: string, number: number) =>
 
 // ---------- SSE write ----------
 
-/** Open an SSE connection for chapter generation. Returns an EventSource. */
+export interface WriteSSEHandlers {
+  onProgress?: (msg: string) => void
+  onContext?: (data: unknown) => void
+  /** *replay* is true when the server sends the full buffered text on reconnect. */
+  onToken?: (text: string, meta?: { replay?: boolean }) => void
+  onDraft?: (data: unknown) => void
+  onCheck?: (data: unknown) => void
+  onEnrichment?: (data: unknown) => void
+  onError?: (msg: string) => void
+  onDone?: (data: unknown) => void
+}
+
+export interface WriteSSEHandle {
+  close: () => void
+}
+
+/**
+ * Stream chapter generation via fetch + ReadableStream (more reliable than
+ * EventSource through Vite proxy; supports named SSE events).
+ *
+ * Pass ``resume: true`` to attach to an in-flight write without starting a new one.
+ */
 export function writeChapterSSE(
   projectId: string,
   number: number,
-  handlers: {
-    onProgress?: (msg: string) => void
-    onContext?: (data: unknown) => void
-    onDraft?: (data: unknown) => void
-    onCheck?: (data: unknown) => void
-    onEnrichment?: (data: unknown) => void
-    onError?: (msg: string) => void
-    onDone?: (data: unknown) => void
-  },
-): EventSource {
-  // We use POST with SSE via fetch-event-source pattern.
-  // For simplicity, use native fetch + EventSource workaround:
-  // FastAPI's sse-starlette supports GET; for POST we use fetch.
-  // Simpler approach: just use fetch with streaming.
-  const es = new EventSource(`/api/projects/${projectId}/write/${number}`)
-  es.addEventListener('progress', (e: MessageEvent) => {
-    const d = JSON.parse(e.data)
-    handlers.onProgress?.(d.message || d)
-  })
-  es.addEventListener('context', (e: MessageEvent) => {
-    handlers.onContext?.(JSON.parse(e.data))
-  })
-  es.addEventListener('draft', (e: MessageEvent) => {
-    handlers.onDraft?.(JSON.parse(e.data))
-  })
-  es.addEventListener('check', (e: MessageEvent) => {
-    handlers.onCheck?.(JSON.parse(e.data))
-  })
-  es.addEventListener('enrichment', (e: MessageEvent) => {
-    handlers.onEnrichment?.(JSON.parse(e.data))
-  })
-  es.addEventListener('error', (e: MessageEvent) => {
+  handlers: WriteSSEHandlers,
+  opts?: { resume?: boolean },
+): WriteSSEHandle {
+  const ctrl = new AbortController()
+  const qs = opts?.resume ? '?resume=1' : ''
+  const url = `/api/projects/${projectId}/write/${number}${qs}`
+
+  ;(async () => {
     try {
-      const d = JSON.parse((e as MessageEvent).data)
-      handlers.onError?.(d.message || 'Unknown error')
-    } catch {
-      handlers.onError?.('Connection error')
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'text/event-stream' },
+        signal: ctrl.signal,
+        cache: 'no-store',
+      })
+      if (!res.ok || !res.body) {
+        handlers.onError?.(`连接失败（HTTP ${res.status}）`)
+        return
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let buffer = ''
+      let currentEvent = 'message'
+      let dataLines: string[] = []
+
+      const dispatch = () => {
+        if (!dataLines.length) {
+          currentEvent = 'message'
+          return
+        }
+        const raw = dataLines.join('\n')
+        dataLines = []
+        const event = currentEvent
+        currentEvent = 'message'
+        if (raw === '' || raw === '[DONE]') return
+
+        let parsed: any = raw
+        try { parsed = JSON.parse(raw) } catch { /* keep string */ }
+
+        switch (event) {
+          case 'progress':
+            handlers.onProgress?.(parsed?.message ?? String(parsed))
+            break
+          case 'context':
+            handlers.onContext?.(parsed)
+            break
+          case 'token':
+            if (typeof parsed?.text === 'string' && parsed.text) {
+              handlers.onToken?.(parsed.text, { replay: !!parsed.replay })
+            }
+            break
+          case 'draft':
+            handlers.onDraft?.(parsed)
+            break
+          case 'check':
+            handlers.onCheck?.(parsed)
+            break
+          case 'enrichment':
+            handlers.onEnrichment?.(parsed)
+            break
+          case 'error':
+            handlers.onError?.(parsed?.message || String(parsed))
+            break
+          case 'done':
+            handlers.onDone?.(parsed)
+            break
+          default:
+            break
+        }
+      }
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const parts = buffer.split(/\r?\n/)
+        buffer = parts.pop() ?? ''
+        for (const line of parts) {
+          if (line === '') {
+            dispatch()
+            continue
+          }
+          if (line.startsWith(':')) continue // SSE comment / ping
+          if (line.startsWith('event:')) {
+            currentEvent = line.slice(6).trim()
+            continue
+          }
+          if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart())
+          }
+        }
+      }
+      dispatch()
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return
+      handlers.onError?.(e?.message || '连接中断')
     }
-  })
-  es.addEventListener('done', (e: MessageEvent) => {
-    const d = e.data ? JSON.parse(e.data) : null
-    handlers.onDone?.(d)
-    es.close()
-  })
-  return es
+  })()
+
+  return { close: () => ctrl.abort() }
 }
 
 // ---------- Checkpoints / Branches (version management) ----------
@@ -415,10 +492,19 @@ export const testEmbedding = (projectId: string) =>
 
 // ---------- Write status (poll when SSE disconnects) ----------
 
+export interface WriteStatus {
+  active: boolean
+  finished?: boolean
+  progress: string
+  stream_text?: string
+  error?: string | null
+  started_at?: string
+  draft_exists?: boolean
+  op?: string
+}
+
 export const getWriteStatus = (projectId: string, number: number) =>
-  http.get<{ active: boolean; progress: string; started_at: string; draft_exists?: boolean; op?: string }>(
-    `/projects/${projectId}/write-status/${number}`
-  ).then(r => r.data)
+  http.get<WriteStatus>(`/projects/${projectId}/write-status/${number}`).then(r => r.data)
 
 export const getTasks = (projectId: string) =>
   http.get<{ tasks: { op: string; chapter: number | null; started_at: string; progress: string }[] }>(
@@ -473,4 +559,82 @@ export const previewPrompt = (
 ) =>
   http.get<{ rendered: string }>(`/projects/${projectId}/prompts/${encodeURIComponent(key)}/preview`, {
     params: { number: params.number ?? 1, premise: params.premise ?? '', instructions: params.instructions ?? '' },
+  }).then(r => r.data)
+
+// ---------- LLM Logs ----------
+
+export interface LlmLogSummary {
+  index: number
+  ts: string
+  stage: string
+  chapter: number | null
+  model: string
+  usage_total: number | null
+  has_error: boolean
+  error: string | null
+  prompt_preview: string
+  response_preview: string
+  prompt_chars: number
+  response_chars: number
+}
+
+export interface LlmLogGroup {
+  stage: string
+  count: number
+  entries: LlmLogSummary[]
+}
+
+export interface LlmUsageStats {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  calls: number
+  calls_with_usage: number
+  calls_missing_usage: number
+  date?: string | null
+  scope?: 'day' | 'project'
+}
+
+export interface LlmLogDay {
+  date: string
+  total: number
+  groups: LlmLogGroup[]
+  usage: LlmUsageStats
+}
+
+export interface LlmLogEntry {
+  date: string
+  index: number
+  ts: string
+  started_at: string
+  stage: string
+  project: string
+  chapter: number | null
+  model: string
+  usage: Record<string, number> | null
+  error: string | null
+  warnings: string[]
+  resolved_ids: Record<string, string>
+  prompt: { role: string; content: string }[]
+  /** Extracted main content (prose or stage-formatted structured text). */
+  body: string
+  body_kind: 'prose' | 'structured'
+  response_is_json: boolean
+  /** Raw model response (JSON string or plain text). */
+  response: string
+  meta: Record<string, unknown>
+}
+
+export const listLlmLogDates = (projectId: string) =>
+  http.get<{ dates: string[] }>(`/projects/${projectId}/llm-logs/dates`).then(r => r.data)
+
+export const getLlmLogs = (projectId: string, date: string) =>
+  http.get<LlmLogDay>(`/projects/${projectId}/llm-logs`, { params: { date } }).then(r => r.data)
+
+export const getLlmLogEntry = (projectId: string, date: string, index: number) =>
+  http.get<LlmLogEntry>(`/projects/${projectId}/llm-logs/entry`, { params: { date, index } }).then(r => r.data)
+
+export const getLlmUsage = (projectId: string, date?: string) =>
+  http.get<LlmUsageStats>(`/projects/${projectId}/llm-logs/usage`, {
+    params: date ? { date } : undefined,
   }).then(r => r.data)

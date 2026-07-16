@@ -1,0 +1,43 @@
+.tab-card {
+  background: var(--rb-bg-surface);
+  border: 1px solid var(--rb-border-light);
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.tab-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.toolbar-hint { font-size: 13px; color: var(--rb-text-muted); }
+.toolbar-actions { display: flex; gap: 8px; }
+
+.dim-text { color: var(--rb-text-muted); font-size: 13px; }
+
+.thread-updates { padding: 8px 16px; }
+.thread-update-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--rb-text-secondary);
+  margin-bottom: 6px;
+}
+
+.md-body {
+  font-size: 14px;
+  line-height: 1.9;
+  color: var(--rb-text-primary);
+}
+
+.md-body h1 { font-size: 18px; }
+.md-body h2 { font-size: 16px; }
+.md-body h3 { font-size: 15px; }
+.md-body p { margin: 8px 0; }
+.md-body ul, .md-body ol { padding-left: 22px; }

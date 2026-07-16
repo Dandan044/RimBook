@@ -67,7 +67,7 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "zh_name": "全书梗概 · 系统",
         "zh_module": "全书梗概",
         "description": "生成「全书梗概」时给 LLM 的系统提示：定位资深小说策划，"
-        "要求产出主题/主线/实体轮廓/世界观/结局，600-900 字。",
+        "要求产出主题/目标读者/叙事结构/冲突体系/主线/实体轮廓/世界观规则/结局，600-900 字。",
         "placeholders": [],
         "in_use": True,
     },
@@ -85,7 +85,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "卷大纲 · 系统",
         "zh_module": "卷大纲",
-        "description": "规划「卷大纲」时的系统提示：定位资深小说策划，400-600 字。",
+        "description": "规划「卷大纲」时的系统提示：定位资深小说策划，"
+        "含张力曲线与伏笔规划，400-600 字。",
         "placeholders": [],
         "in_use": True,
     },
@@ -94,10 +95,13 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "user",
         "zh_name": "卷大纲 · 用户",
         "zh_module": "卷大纲",
-        "description": "规划某一卷的用户消息，注入全书梗概、已有卷目与卷号/标题。",
+        "description": "规划某一卷的用户消息，注入全书梗概、已有卷目、前卷章节回顾、已有实体清单、未回收线索与卷号/标题。",
         "placeholders": [
             _ph("synopsis", "全书梗概", "outline.read_synopsis()"),
             _ph("existing_desc", "已规划的卷目列表", "outline.list_volumes() 格式化"),
+            _ph("prev_recap_block", "前卷已写章节回顾（最近若干章 beat+摘要）", "outline.list_chapters() 取最近8章"),
+            _ph("entity_registry_block", "已有实体清单（复用 id 避免重复塑造）", "codex.iter_all() 格式化"),
+            _ph("open_threads_block", "未回收的情节线索（本卷应推进或回收）", "threads.format_open_threads()"),
             _ph("number", "本卷序号", "用户指定的卷号"),
             _ph("title_hint", "可能的标题注脚（形如“（标题：xx）”，无则空）", "卷标题"),
         ],
@@ -109,7 +113,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "zh_name": "章节 beat · 系统",
         "zh_module": "章节 beat",
         "description": "规划章节 beat 时的系统提示，定义节奏字段（purpose/value_shift/"
-        "tension/hook/story_date/elapsed）、entities id 复用规则与 JSON 输出格式。",
+        "tension/hook/story_date/elapsed）、beat 间因果衔接与一致性要求、"
+        "entities id 复用规则与 JSON 输出格式。",
         "placeholders": [],
         "in_use": True,
     },
@@ -137,8 +142,9 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "章节写作 · 系统",
         "zh_module": "章节写作",
-        "description": "撰写章节正文时的系统提示：小说家 persona 与六条写作原则"
-        "（遵循 beat、不 OOC、世界观一致、展现而非讲述、人称时态连贯、纯净正文）。",
+        "description": "撰写章节正文时的系统提示：小说家 persona 与十条写作原则"
+        "（遵循 beat、不 OOC、世界观一致、展现而非讲述、人称时态连贯、"
+        "数值一致、因果自洽、避免陈词滥调、场景转换交代、纯净正文）。",
         "placeholders": [],
         "in_use": True,
     },
@@ -155,18 +161,29 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         ],
         "in_use": True,
     },
+    "writer_revise_system": {
+        "stage": STAGE_WRITING,
+        "role": "system",
+        "zh_name": "章节修订 · 系统",
+        "zh_module": "章节修订",
+        "description": "修订章节正文的系统提示：资深修订编辑 persona，内嵌七类"
+        "主动查错清单（逻辑/数值/常识/时间线/空间/设定/OOC）与修订原则，"
+        "要求即使无用户意见也主动发现并修正基础错误。",
+        "placeholders": [],
+        "in_use": True,
+    },
     "writer_revise_user": {
         "stage": STAGE_WRITING,
         "role": "user",
         "zh_name": "章节修订 · 用户",
         "zh_module": "章节修订",
-        "description": "修订章节正文的用户消息，注入上下文、当前草稿与修订要求"
-        "（被自动修复与手动修订共用）。",
+        "description": "手动修订章节正文的用户消息，注入上下文、当前草稿与修订要求，"
+        "要求先按查错清单审视再修订（auto-fix 已改走 fix_* 提示词）。",
         "placeholders": [
             _ph("number", "本章序号", "章节号"),
             _ph("context", "结构化上下文全文", "assembler.assemble_for_chapter()"),
             _ph("draft_text", "当前章节草稿正文", "drafts/ch<N>.md"),
-            _ph("instructions", "修订要求（由审校问题摘要或用户给出）", "checker 自动修复 / 用户指令"),
+            _ph("instructions", "修订要求（用户给出，可为空）", "用户指令"),
         ],
         "in_use": True,
     },
@@ -175,7 +192,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "章节摘要 · 系统",
         "zh_module": "章节摘要",
-        "description": "生成章节摘要时的系统提示，要求 250-400 字客观摘要。",
+        "description": "生成章节摘要时的系统提示，要求 250-400 字客观摘要，"
+        "含关键数值锚点与[存疑]错误标注。",
         "placeholders": [],
         "in_use": True,
     },
@@ -184,9 +202,10 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "user",
         "zh_name": "章节摘要 · 用户",
         "zh_module": "章节摘要",
-        "description": "生成章节摘要的用户消息，注入章号与章节正文。",
+        "description": "生成章节摘要的用户消息，注入章号、本章 beat（对照计划vs实际）与章节正文。",
         "placeholders": [
             _ph("chapter_number", "本章序号", "章节号"),
+            _ph("beat_block", "本章计划 beat（摘要应对照计划与实际，偏离时注明）", "outline.read_chapter().beats"),
             _ph("chapter_text", "本章草稿正文", "drafts/ch<N>.md"),
         ],
         "in_use": True,
@@ -197,7 +216,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "zh_name": "实体状态增量 · 系统",
         "zh_module": "实体状态增量",
         "description": "抽取实体状态增量的系统提示：定义 location/status 覆盖、"
-        "knowledge/possessions 增删、relationships 增删的生命周期规则。",
+        "knowledge/possessions 增删、relationships 增删的生命周期规则，"
+        "含数值准确性要求。",
         "placeholders": [],
         "in_use": True,
     },
@@ -212,6 +232,7 @@ PROMPT_META: dict[str, dict[str, Any]] = {
             _ph("chapter_number", "本章序号", "章节号"),
             _ph("chapter_text", "本章草稿正文", "drafts/ch<N>.md"),
             _ph("entity_ids", "本章涉及的实体 id 列表", "chapter.all_entities()"),
+            _ph("entity_states_block", "各实体当前状态块（含标题行，无则空）", "EntityStateStore.get_many() 格式化"),
         ],
         "in_use": True,
     },
@@ -220,7 +241,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "一致性审校 · 系统",
         "zh_module": "一致性审校",
-        "description": "一致性审校的系统提示，检查设定/角色 OOC/时间线情节/事实连贯四维。",
+        "description": "一致性审校的系统提示，八维检查：设定/角色 OOC/时间线情节/"
+        "事实连贯/逻辑一致性/数值数量/常识物理/因果衔接。",
         "placeholders": [],
         "in_use": True,
     },
@@ -244,7 +266,7 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "zh_name": "定点修复 · 系统",
         "zh_module": "定点修复",
         "description": "审校自动修复的系统提示：只修改与问题相关的段落，"
-        "保留其余正文与文风（由 Writer.apply_minimal_fix 使用）。",
+        "保留其余正文与文风，修复后自检避免引入新错误（由 Writer.apply_minimal_fix 使用）。",
         "placeholders": [],
         "in_use": True,
     },
@@ -266,7 +288,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "zh_name": "设定档案充实 · 系统",
         "zh_module": "设定档案充实",
         "description": "设定档案充实的系统提示：定义新实体发现、已有档案追加揭示、"
-        "矛盾提醒三项任务，以及 new_entities/updates/summary 的 JSON 输出契约。",
+        "矛盾提醒三项任务，含人物能力数值边界与世界观规则体系记录，"
+        "以及 new_entities/updates/summary 的 JSON 输出契约。",
         "placeholders": [],
         "in_use": True,
     },
@@ -288,7 +311,7 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "风格指南反推 · 系统",
         "zh_module": "风格指南",
-        "description": "从已写章节样本提炼「写作风格指南」（人称/时态/基调/禁忌/示例段落）"
+        "description": "从已写章节样本提炼「写作风格指南」（人称/时态/基调/段落密度/禁忌/示例段落）"
         "的系统提示，由 `rimbook style generate` 使用。",
         "placeholders": [],
         "in_use": True,
@@ -298,9 +321,10 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "user",
         "zh_name": "风格指南反推 · 用户",
         "zh_module": "风格指南",
-        "description": "风格指南反推的用户消息，注入书名与章节正文样本。",
+        "description": "风格指南反推的用户消息，注入书名、全书梗概（题材基调参照）与章节正文样本。",
         "placeholders": [
             _ph("title", "小说标题", "config.title"),
+            _ph("synopsis", "全书梗概（题材与基调参照）", "outline.read_synopsis()"),
             _ph("samples", "最近几章的正文节选", "drafts/ch*.md"),
         ],
         "in_use": True,
@@ -311,7 +335,7 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "zh_name": "卷情节回顾 · 系统",
         "zh_module": "分层记忆",
         "description": "把一卷的章节摘要压缩为「卷情节回顾」（实际发生的剧情，400-600 字）"
-        "的系统提示；卷完结后自动生成，注入后续章节上下文。",
+        "的系统提示，含关键数值变化记录；卷完结后自动生成，注入后续章节上下文。",
         "placeholders": [],
         "in_use": True,
     },
@@ -334,7 +358,7 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "zh_name": "全书至今故事线 · 系统",
         "zh_module": "分层记忆",
         "description": "增量维护「全书至今」滚动故事线的系统提示：早期剧情压缩更狠、"
-        "近期剧情保留细节；每写 N 章自动刷新。",
+        "近期剧情保留细节，保留关键数值锚点；每写 N 章自动刷新。",
         "placeholders": [],
         "in_use": True,
     },
@@ -380,8 +404,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "宏观审阅 · 系统",
         "zh_module": "宏观审阅",
-        "description": "卷级/区间级宏观编辑审阅的系统提示：检查节奏、重复桥段、"
-        "角色声音趋同、线索管理与结构失衡，由 `rimbook review` 使用。",
+        "description": "卷级/区间级宏观编辑审阅的系统提示：八维检查（节奏/重复/角色声音/"
+        "线索/结构/逻辑数值/角色弧光/主题呼应），由 `rimbook review` 使用。",
         "placeholders": [],
         "in_use": True,
     },
@@ -393,6 +417,7 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "description": "宏观审阅的用户消息，注入审阅范围、各章信息摘要与正文抽样。",
         "placeholders": [
             _ph("scope", "审阅范围描述", "CLI 参数"),
+            _ph("synopsis", "全书梗概（主题与基调参照）", "outline.read_synopsis()"),
             _ph("chapter_digest", "各章标题/张力/功能/摘要拼接", "outline.list_chapters()"),
             _ph("prose_samples", "各章开头/结尾正文抽样", "drafts/ch*.md"),
         ],
@@ -604,6 +629,7 @@ def render_preview(
         "volume_arc_block": volume_arc_block,
         "prev_desc_block": prev_desc_block,
         "open_threads_block": "",
+        "prev_recap_block": prev_desc_block or "（占位示例：前卷已写章节回顾）",
         "entity_registry_block": entity_registry_block,
         "hint_block": hint_block,
         "title_block": title_block,
@@ -613,6 +639,8 @@ def render_preview(
         "chapter_number": number_str,
         "chapter_text": chapter_text,
         "entity_ids": _format_entity_ids(entity_ids),
+        "entity_states_block": "（占位示例：各实体当前状态）",
+        "beat_block": "（占位示例：本章计划 beat，摘要应对照计划与实际）",
         "existing_codex": existing_codex,
         "issues": "（占位示例：审校发现的问题列表）",
         # Style / hierarchical memory / threads / macro review previews.

@@ -50,10 +50,17 @@ def generate_style(
     )
     task_registry.register(project_id, "style_generate", None, "正在提炼风格指南…")
     try:
+        synopsis = ""
+        try:
+            synopsis = deps.outline.read_synopsis().strip()
+        except Exception:
+            synopsis = ""
         messages = deps.llm.as_chat(
             system=deps.prompts.style_generate_system,
             user=deps.prompts.style_generate_user.format(
-                title=deps.config.title, samples=samples,
+                title=deps.config.title,
+                samples=samples,
+                synopsis=synopsis or "（无）",
             ),
         )
         with deps.trace.begin("style", project=deps.project_dir.name) as t:
@@ -236,12 +243,18 @@ def run_macro_review(
         samples.append(block)
     prose_samples = "\n\n".join(samples) or "（无正文抽样）"
 
+    synopsis = ""
+    try:
+        synopsis = deps.outline.read_synopsis().strip()
+    except Exception:
+        synopsis = ""
     task_registry.register(project_id, "review", None, f"正在宏观审阅 {scope}…")
     try:
         messages = deps.llm.as_chat(
             system=deps.prompts.macro_review_system,
             user=deps.prompts.macro_review_user.format(
-                scope=scope, chapter_digest=digest, prose_samples=prose_samples,
+                scope=scope, synopsis=synopsis or "（暂无全书梗概）",
+                chapter_digest=digest, prose_samples=prose_samples,
             ),
         )
         with deps.trace.begin("macro_review", project=deps.project_dir.name) as t:

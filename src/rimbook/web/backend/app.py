@@ -15,7 +15,7 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 
-from .routes import codex, narrative, outline, projects, prompts, server, status, versioning, writer
+from .routes import codex, llm_logs, narrative, outline, projects, prompts, server, status, versioning, writer
 
 app = FastAPI(
     title="RimBook",
@@ -48,6 +48,7 @@ app.include_router(prompts.router)
 app.include_router(prompts.preview_router)
 app.include_router(server.router)
 app.include_router(versioning.router)
+app.include_router(llm_logs.router)
 
 # ---------------------------------------------------------------------------
 # Global workspace config routes (not tied to any project)
@@ -159,15 +160,24 @@ if _static_dir.exists() and any(_static_dir.iterdir()):
     # can handle client-side routing.
     from fastapi.responses import FileResponse
 
+    # index.html must not be cached — otherwise a rebuilt SPA (new menu items,
+    # new hashed bundles) stays invisible until a hard refresh.
+    _HTML_NO_CACHE = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0",
+    }
+
     @app.get("/{path:path}")
     async def spa_fallback(path: str):
         """Serve index.html for all non-API routes (SPA client-side routing)."""
         # If the path matches an actual static file, serve it directly.
         file_path = _static_dir / path
         if file_path.is_file():
-            return FileResponse(str(file_path))
+            headers = _HTML_NO_CACHE if file_path.suffix.lower() in {".html", ".htm"} else None
+            return FileResponse(str(file_path), headers=headers)
         # Otherwise serve index.html for Vue Router to handle.
-        return FileResponse(str(_static_dir / "index.html"))
+        return FileResponse(str(_static_dir / "index.html"), headers=_HTML_NO_CACHE)
 
 
 def main():

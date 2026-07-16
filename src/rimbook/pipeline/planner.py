@@ -79,16 +79,42 @@ class Planner:
     # Volumes
     # ------------------------------------------------------------------
     def plan_volume(self, number: int, *, title: str = "", persist: bool = True) -> VolumeOutline:
-        """Plan a single volume based on the synopsis + existing volumes."""
+        """Plan a single volume based on the synopsis + existing volumes + prior context.
+
+        Injects prior-chapter recaps, the existing codex entity list and open
+        plot threads so the volume outline can衔接 actual prior剧情 and reuse
+        already-cast entities instead of planning in a vacuum.
+        """
         synopsis = self.outline.read_synopsis().strip()
         existing = self.outline.list_volumes()
         existing_desc = _format_existing_volumes(existing)
+
+        # Prior-chapter recaps: build on what actually happened, not just on
+        # prior volume arcs. Cap to the most recent 8 chapters to bound length.
+        prev = self.outline.list_chapters()
+        prev_recap = _format_prev_chapters(prev[-8:]) if prev else ""
+        entity_registry = self._format_entity_registry()
+        # Open threads up to the latest written chapter — the volume should
+        # advance or resolve them rather than letting them dangle.
+        max_chapter = max((c.number for c in prev), default=0)
+        open_threads = self._format_open_threads(max_chapter + 1)
 
         messages = self.llm.as_chat(
             system=self.prompts.volume_system,
             user=self.prompts.volume_user.format(
                 synopsis=synopsis,
                 existing_desc=existing_desc or "（无）",
+                prev_recap_block=(
+                    f"前卷已写章节回顾（请与本卷衔接，避免重复或断层）：\n{prev_recap}\n\n"
+                    if prev_recap else ""
+                ),
+                entity_registry_block=(
+                    f"{entity_registry}\n\n" if entity_registry else ""
+                ),
+                open_threads_block=(
+                    f"未回收的情节线索（本卷应推进或回收，不得遗忘）：\n{open_threads}\n\n"
+                    if open_threads else ""
+                ),
                 number=number,
                 title_hint=(f"（标题：{title}）" if title else ""),
             ),
