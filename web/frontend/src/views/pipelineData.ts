@@ -13,7 +13,7 @@ export const STAGES: Record<string, StageMeta> = {
     id: 'planner',
     nameZh: '规划器 (Planner)',
     nameEn: '规划器 (Planner)',
-    description: '三步级联规划：先写全书 Synopsis，再拆 Volume 弧线，最后规划每章 Beats 与实体。codex 参与时会将实体清单注入 prompt 并用 resolve_entity_ids 规范化 id，防止 id 分叉。',
+    description: '级联规划：先写全书 Synopsis；规划 Volume 时在同一次对话内产出卷大纲/结局 + 该卷全部章 Beats（章数由模型自决）。禁止无卷生章、禁止重复规划已有卷；仍可对单章补规划或重生成 Beat。',
     reads: [
       { source: '用户输入', desc: '故事 premise / 想法' },
       { source: 'OutlineStore', desc: 'synopsis、已有 volume、已有 chapter outlines（作为上文）' },
@@ -21,10 +21,15 @@ export const STAGES: Record<string, StageMeta> = {
     ],
     writes: [
       { target: 'outline/synopsis.md', desc: '全书核心梗概（Markdown）' },
-      { target: 'outline/volumes/volN.md', desc: '卷目弧线（YAML frontmatter + Markdown body）' },
+      { target: 'outline/volumes/volN.md', desc: '卷目弧线 + ending + chapters 列表（YAML frontmatter + Markdown body）' },
       { target: 'outline/chapters/chN.md', desc: '章节大纲：beats / entities / tags / notes（YAML + MD）' },
     ],
-    llmPrompts: ['synopsis_system + synopsis_user', 'volume_system + volume_user', 'chapter_outline_system + chapter_outline_user'],
+    llmPrompts: [
+      'synopsis_system + synopsis_user',
+      'volume_system + volume_user',
+      'volume_chapters_system + volume_chapters_user',
+      'chapter_outline_system + chapter_outline_user',
+    ],
   },
   'context-assembler': {
     id: 'context-assembler',

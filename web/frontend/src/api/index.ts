@@ -149,19 +149,30 @@ export const updateSynopsis = (projectId: string, text: string) =>
 export const generateSynopsis = (projectId: string, premise: string) =>
   http.post<{ text: string }>(`/projects/${projectId}/outline/synopsis`, { text: premise }).then(r => r.data)
 
+export interface VolumePlanResult {
+  volume: VolumeOutline
+  chapters: ChapterOutline[]
+  warnings?: string[]
+}
+
 export const listVolumes = (projectId: string) =>
   http.get<VolumeOutline[]>(`/projects/${projectId}/outline/volumes`).then(r => r.data)
 
 export const planVolume = (projectId: string, title?: string) =>
-  http.post<VolumeOutline>(`/projects/${projectId}/outline/volumes`, { title: title || '' }).then(r => r.data)
+  http.post<VolumePlanResult>(`/projects/${projectId}/outline/volumes`, { title: title || '' }).then(r => r.data)
 
 export const updateVolume = (projectId: string, number: number, data: Partial<VolumeOutline>) =>
   http.put<VolumeOutline>(`/projects/${projectId}/outline/volumes/${number}`, data).then(r => r.data)
 
+export const deleteVolume = (projectId: string, number: number) =>
+  http.delete<{ ok: boolean; volume: number; deleted_chapters: number[] }>(
+    `/projects/${projectId}/outline/volumes/${number}`,
+  ).then(r => r.data)
+
 export const listChapters = (projectId: string) =>
   http.get<ChapterOutline[]>(`/projects/${projectId}/outline/chapters`).then(r => r.data)
 
-export const planChapter = (projectId: string, data: { volume?: number; title?: string; hint?: string }) =>
+export const planChapter = (projectId: string, data: { volume: number; title?: string; hint?: string }) =>
   http.post<ChapterOutline>(`/projects/${projectId}/outline/chapters`, data).then(r => r.data)
 
 export const getChapter = (projectId: string, number: number) =>
@@ -170,8 +181,13 @@ export const getChapter = (projectId: string, number: number) =>
 export const updateChapter = (projectId: string, number: number, data: Partial<ChapterOutline>) =>
   http.put<ChapterOutline>(`/projects/${projectId}/outline/chapters/${number}`, data).then(r => r.data)
 
-export const regenerateChapter = (projectId: string, number: number, data: { volume?: number; title?: string; hint?: string }) =>
+export const regenerateChapter = (projectId: string, number: number, data: { volume: number; title?: string; hint?: string }) =>
   http.post<ChapterOutline>(`/projects/${projectId}/outline/chapters/${number}/regenerate`, data).then(r => r.data)
+
+export const deleteChapter = (projectId: string, number: number) =>
+  http.delete<{ ok: boolean; chapter: number }>(
+    `/projects/${projectId}/outline/chapters/${number}`,
+  ).then(r => r.data)
 
 // ---------- Narrative: style bible / threads / recap / review ----------
 

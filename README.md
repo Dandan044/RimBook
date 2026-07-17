@@ -42,7 +42,7 @@
 │                         Web UI (Vue 3)                                │
 │  仪表盘 │ 写作规划 │ 写作 │ 设定集 │ LLM 日志 │ 工作流 │ 设置         │
 │                                                                        │
-│  · 写作规划：大纲 + 线索账本 / 风格指南 / 故事线 / 宏观审阅          │
+│  · 写作规划：卷批量规划（卷+全章 beat）/ 单章补规划 / 删除卷章      │
 │  · 写作工作台：结构化上下文 + 分支/回退重写 + SSE 流式生成           │
 │  · 设定集：Tab 式（档案 / 章节发现 / 矛盾）                           │
 │  · LLM 日志：按日浏览 `.llm_logs`，查看 prompt / 响应 / token 用量   │
@@ -138,8 +138,8 @@ init → codex add → outline synopsis → outline chapter → write → check
 | `init` | 初始化小说项目 |
 | `codex add / ls / show / dedup / merge / migrate` | 管理设定集（实体/世界观/地点/势力/物品/时间线） |
 | `outline synopsis` | 生成全书梗概 |
-| `outline volume` | 规划卷大纲 |
-| `outline chapter` | 规划单章 beat |
+| `outline volume` | 规划一卷（含结局），并同会话生成该卷全部章 beat；已存在卷不可重复规划 |
+| `outline chapter` | 规划单章 beat（必须 `--volume`；可往已有卷追加） |
 | `write <n>` | 生成章节正文（完整流水线：上下文组装→写作→校验→富化） |
 | `enrich <n>` | 单独运行 PostWrite 富化流水线（从已写章节发现实体、标记矛盾、抽取线索） |
 | `check <n>` | 单独跑一致性校验 |

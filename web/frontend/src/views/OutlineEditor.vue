@@ -36,20 +36,20 @@
               <span class="ai-hero-icon"><el-icon :size="22"><FolderAdd /></el-icon></span>
               <span class="ai-hero-body">
                 <span class="ai-hero-title">新卷</span>
-                <span class="ai-hero-desc">规划下一卷的主线弧光与结局</span>
+                <span class="ai-hero-desc">规划卷大纲、结局，并生成卷内全部章 beat</span>
               </span>
               <el-icon v-if="generating" class="is-loading ai-hero-loading"><Loading /></el-icon>
             </button>
             <button
               type="button"
               class="ai-hero-card"
-              :disabled="generating"
+              :disabled="generating || !volumes.length"
               @click="confirmAddChapter"
             >
               <span class="ai-hero-icon"><el-icon :size="22"><DocumentAdd /></el-icon></span>
               <span class="ai-hero-body">
                 <span class="ai-hero-title">新章节</span>
-                <span class="ai-hero-desc">生成下一章 beat 与场景节拍</span>
+                <span class="ai-hero-desc">{{ volumes.length ? '在最新一卷下追加一章 beat' : '请先规划卷后再生成章节' }}</span>
               </span>
               <el-icon v-if="generating" class="is-loading ai-hero-loading"><Loading /></el-icon>
             </button>
@@ -98,6 +98,9 @@
                   <el-icon class="editor-title-icon"><Folder /></el-icon>
                   第{{ editingVolume.number }}卷《{{ editingVolume.title }}》
                 </h2>
+                <el-button type="danger" size="small" plain :loading="deleting" @click="confirmDeleteVolume">
+                  <el-icon><Delete /></el-icon> 删除卷
+                </el-button>
               </div>
               <div class="editor-body">
                 <el-form :model="volumeForm" label-width="60px">
@@ -106,6 +109,9 @@
                     <el-input v-model="volumeForm.arc" type="textarea" :rows="12" />
                   </el-form-item>
                   <el-form-item label="结局"><el-input v-model="volumeForm.ending" type="textarea" :rows="4" /></el-form-item>
+                  <el-form-item v-if="(editingVolume.chapters || []).length" label="章节">
+                    <span class="muted-meta">第 {{ editingVolume.chapters.join('、') }} 章（由系统维护）</span>
+                  </el-form-item>
                   <el-form-item v-if="editingVolume.recap" label="回顾">
                     <el-alert type="info" :closable="false" class="recap-alert">
                       <template #title>实际剧情回顾（由摘要自动生成，只读）</template>
@@ -127,9 +133,14 @@
                   <el-icon class="editor-title-icon"><EditPen /></el-icon>
                   第{{ editingChapter.number }}章《{{ editingChapter.title }}》
                 </h2>
-                <el-button size="small" @click="generateBeat" :loading="generating">
-                  <el-icon><MagicStick /></el-icon> LLM 生成 Beat
-                </el-button>
+                <div class="editor-header-actions">
+                  <el-button size="small" @click="generateBeat" :loading="generating">
+                    <el-icon><MagicStick /></el-icon> LLM 生成 Beat
+                  </el-button>
+                  <el-button type="danger" size="small" plain :loading="deleting" @click="confirmDeleteChapter">
+                    <el-icon><Delete /></el-icon> 删除章
+                  </el-button>
+                </div>
               </div>
               <div class="editor-body">
                 <el-form label-width="60px">
@@ -251,8 +262,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/project'
 import {
   getSynopsis, updateSynopsis, generateSynopsis as apiGenerateSynopsis,
-  listVolumes, planVolume, updateVolume,
-  listChapters, planChapter, updateChapter, regenerateChapter,
+  listVolumes, planVolume, updateVolume, deleteVolume,
+  listChapters, planChapter, updateChapter, regenerateChapter, deleteChapter,
   type VolumeOutline, type ChapterOutline, type SceneBeat,
 } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -262,6 +273,7 @@ const store = useProjectStore()
 const route = useRoute()
 const router = useRouter()
 const generating = ref(false)
+const deleting = ref(false)
 const mainTab = ref('outline')
 
 const VALID_TABS = new Set(['outline', 'threads', 'style', 'recap', 'review'])
@@ -431,7 +443,7 @@ async function confirmAddVolume() {
     : 1
   try {
     await ElMessageBox.confirm(
-      `将由 AI 规划第 ${nextNum} 卷大纲（主线弧光与结局）。是否继续？`,
+      `将由 AI 规划第 ${nextNum} 卷（大纲 + 结局），并一次性生成该卷全部章节 beat。已存在的卷不能重复规划。是否继续？`,
       '规划新卷',
       {
         type: 'info',
@@ -449,25 +461,37 @@ async function addVolume() {
   if (!store.currentId) return
   generating.value = true
   try {
-    const v = await planVolume(store.currentId)
-    volumes.value.push(v)
-    ElMessage.success(`第${v.number}卷已规划`)
-  } catch (e: any) { ElMessage.error('规划失败') }
-  finally { generating.value = false }
+    const result = await planVolume(store.currentId)
+    await fetchData()
+    editing.value = 'volume'
+    editingVolume.value = result.volume
+    Object.assign(volumeForm, {
+      title: result.volume.title,
+      arc: result.volume.arc,
+      ending: result.volume.ending,
+    })
+    const n = result.chapters?.length || 0
+    ElMessage.success(`第${result.volume.number}卷已规划，并生成 ${n} 章 beat`)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '规划失败')
+  } finally {
+    generating.value = false
+  }
 }
 
 async function confirmAddChapter() {
   if (!store.currentId) return
+  if (!volumes.value.length) {
+    ElMessage.warning('请先规划卷，才能生成章节')
+    return
+  }
   const nextNum = chapters.value.length
     ? Math.max(...chapters.value.map(c => c.number)) + 1
     : 1
-  const lastVol = volumes.value.length ? volumes.value[volumes.value.length - 1] : null
-  const volHint = lastVol
-    ? `将归属第 ${lastVol.number} 卷《${lastVol.title || '未命名'}》`
-    : '当前尚无分卷，章节将作为未分卷章节'
+  const lastVol = volumes.value[volumes.value.length - 1]
   try {
     await ElMessageBox.confirm(
-      `将由 AI 规划第 ${nextNum} 章 beat 与场景节拍。${volHint}。是否继续？`,
+      `将由 AI 规划第 ${nextNum} 章 beat，归属第 ${lastVol.number} 卷《${lastVol.title || '未命名'}》。是否继续？`,
       '规划新章节',
       {
         type: 'info',
@@ -483,27 +507,38 @@ async function confirmAddChapter() {
 
 async function addChapter() {
   if (!store.currentId) return
+  if (!volumes.value.length) {
+    ElMessage.warning('请先规划卷，才能生成章节')
+    return
+  }
   generating.value = true
   try {
-    const lastVol = volumes.value.length ? volumes.value[volumes.value.length - 1].number : undefined
+    const lastVol = volumes.value[volumes.value.length - 1].number
     const c = await planChapter(store.currentId, { volume: lastVol })
-    chapters.value.push(c)
+    await fetchData()
     ElMessage.success(`第${c.number}章 beat 已规划`)
-  } catch (e: any) { ElMessage.error('规划失败') }
-  finally { generating.value = false }
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '规划失败')
+  } finally {
+    generating.value = false
+  }
 }
 
 async function generateBeat() {
   // Re-plan current chapter beat via LLM (preserves chapter number + summary)
   if (!store.currentId || !editingChapter.value) return
+  const vol = editingChapter.value.volume ?? chapterForm.volume
+  if (!vol) {
+    ElMessage.warning('请先为本章指定所属卷并保存')
+    return
+  }
   generating.value = true
   try {
     const chNum = editingChapter.value.number
     const c = await regenerateChapter(store.currentId, chNum, {
-      volume: editingChapter.value.volume || undefined,
+      volume: vol,
       title: editingChapter.value.title,
     })
-    // Replace the chapter in our list (same number, so findIndex should match)
     const idx = chapters.value.findIndex(ch => ch.number === chNum)
     if (idx >= 0) chapters.value[idx] = c
     else chapters.value.push(c)
@@ -519,15 +554,82 @@ async function generateBeat() {
   finally { generating.value = false }
 }
 
+async function confirmDeleteVolume() {
+  if (!store.currentId || !editingVolume.value) return
+  const vol = editingVolume.value
+  const chCount = chapters.value.filter(c => c.volume === vol.number).length
+  try {
+    await ElMessageBox.confirm(
+      `将删除第 ${vol.number} 卷《${vol.title || '未命名'}》及其下 ${chCount} 个章节大纲（含对应草稿/定稿，如有）。此操作不可撤销。`,
+      '删除卷',
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    const r = await deleteVolume(store.currentId, vol.number)
+    editing.value = 'none'
+    editingVolume.value = null
+    await fetchData()
+    ElMessage.success(`已删除第 ${vol.number} 卷（含 ${r.deleted_chapters.length} 章）`)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '删除失败')
+  } finally {
+    deleting.value = false
+  }
+}
+
+async function confirmDeleteChapter() {
+  if (!store.currentId || !editingChapter.value) return
+  const ch = editingChapter.value
+  const draftHint = ch.has_draft ? '（该章已有正文草稿，将一并删除）' : ''
+  try {
+    await ElMessageBox.confirm(
+      `将删除第 ${ch.number} 章《${ch.title || '未命名'}》大纲${draftHint}。此操作不可撤销。`,
+      '删除章节',
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  deleting.value = true
+  try {
+    await deleteChapter(store.currentId, ch.number)
+    editing.value = 'none'
+    editingChapter.value = null
+    await fetchData()
+    ElMessage.success(`已删除第 ${ch.number} 章`)
+  } catch (e: any) {
+    ElMessage.error(e?.response?.data?.detail || '删除失败')
+  } finally {
+    deleting.value = false
+  }
+}
+
 async function saveVolume() {
   if (!store.currentId || !editingVolume.value) return
-  await updateVolume(store.currentId, editingVolume.value.number, { ...volumeForm, number: editingVolume.value.number, chapters: editingVolume.value.chapters } as any)
+  await updateVolume(store.currentId, editingVolume.value.number, {
+    title: volumeForm.title,
+    arc: volumeForm.arc,
+    ending: volumeForm.ending,
+  } as any)
   ElMessage.success('已保存')
   await fetchData()
+  const refreshed = volumes.value.find(v => v.number === editingVolume.value?.number)
+  if (refreshed) {
+    editingVolume.value = refreshed
+    Object.assign(volumeForm, { title: refreshed.title, arc: refreshed.arc, ending: refreshed.ending })
+  }
 }
 
 async function saveChapter() {
   if (!store.currentId || !editingChapter.value) return
+  if (!chapterForm.volume) {
+    ElMessage.warning('章节必须归属某一卷')
+    return
+  }
   await updateChapter(store.currentId, editingChapter.value.number, {
     title: chapterForm.title, volume: chapterForm.volume,
     entities: chapterForm.entities, tags: chapterForm.tags,
@@ -777,6 +879,18 @@ onMounted(fetchData)
   border-bottom: 1px solid var(--rb-border-light);
   gap: 16px;
   flex-wrap: wrap;
+}
+
+.editor-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.muted-meta {
+  color: var(--rb-text-secondary, #6b7280);
+  font-size: 13px;
 }
 
 .editor-title {
