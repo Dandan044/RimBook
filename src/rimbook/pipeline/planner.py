@@ -15,6 +15,7 @@ character), the planner now receives the codex as a dependency and:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from ..codex import CodexStore, resolve_entity_ids
@@ -87,13 +88,18 @@ class Planner:
     # ------------------------------------------------------------------
     # Volumes
     # ------------------------------------------------------------------
-    def plan_volume(self, number: int, *, title: str = "", persist: bool = True) -> VolumeOutline:
-        """Plan a single volume based on the synopsis + existing volumes + prior context.
+    def plan_volume(
+        self, number: int, *, title: str = "", persist: bool = True
+    ) -> VolumePlanResult:
+        """Batch-plan a volume and all its chapter beats in one conversation.
 
-        Injects prior-chapter recaps, the existing codex entity list and open
-        plot threads so the volume outline can衔接 actual prior剧情 and reuse
-        already-cast entities instead of planning in a vacuum.
+        Turn 1 returns structured volume JSON (title/arc/ending/chapter_count);
+        turn 2 continues the same chat history and returns all chapter beats.
+        Nothing is written until both rounds parse successfully.
         """
+        if self.outline.read_volume(number) is not None:
+            raise FileExistsError(f"第 {number} 卷已存在，禁止重复规划")
+
         synopsis = self.outline.read_synopsis().strip()
         existing = self.outline.list_volumes()
         existing_desc = _format_existing_volumes(existing)
@@ -108,35 +114,88 @@ class Planner:
         max_chapter = max((c.number for c in prev), default=0)
         open_threads = self._format_open_threads(max_chapter + 1)
 
+        entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
+        open_threads_block = (
+            f"未回收的情节线索（本卷应推进或回收，不得遗忘）：\n{open_threads}\n\n"
+            if open_threads
+            else ""
+        )
+
+        turn1_user = self.prompts.volume_user.format(
+            synopsis=synopsis,
+            existing_desc=existing_desc or "（无）",
+            prev_recap_block=(
+                f"前卷已写章节回顾（请与本卷衔接，避免重复或断层）：\n{prev_recap}\n\n"
+                if prev_recap
+                else ""
+            ),
+            entity_registry_block=entity_registry_block,
+            open_threads_block=open_threads_block,
+            number=number,
+            title_hint=(f"（标题：{title}）" if title else ""),
+        )
         messages = self.llm.as_chat(
             system=self.prompts.volume_system,
-            user=self.prompts.volume_user.format(
-                synopsis=synopsis,
-                existing_desc=existing_desc or "（无）",
-                prev_recap_block=(
-                    f"前卷已写章节回顾（请与本卷衔接，避免重复或断层）：\n{prev_recap}\n\n"
-                    if prev_recap else ""
-                ),
-                entity_registry_block=(
-                    f"{entity_registry}\n\n" if entity_registry else ""
-                ),
-                open_threads_block=(
-                    f"未回收的情节线索（本卷应推进或回收，不得遗忘）：\n{open_threads}\n\n"
-                    if open_threads else ""
-                ),
-                number=number,
-                title_hint=(f"（标题：{title}）" if title else ""),
-            ),
+            user=turn1_user,
         )
         with self.trace.begin("volume", project=self.project_name, volume=number) as t:
-            result = self.llm.generate(messages, temperature=0.8)
-            t.record(messages, result)
-        arc = result.content.strip()
+            vol_data = self.llm.generate_json(messages, temperature=0.7)
+            t.record(messages, vol_data, model=self.llm.default_model)
 
-        vol = VolumeOutline(number=number, title=title, arc=arc)
+        vol_title, arc, ending, chapter_count, warnings = _parse_volume_json(
+            vol_data, number=number, title_hint=title
+        )
+
+        start_number = self.outline.last_chapter_number() + 1
+        history = [
+            {"role": "user", "content": turn1_user},
+            {
+                "role": "assistant",
+                "content": json.dumps(dict(vol_data), ensure_ascii=False),
+            },
+        ]
+        messages2 = self.llm.as_chat(
+            system=self.prompts.volume_chapters_system,
+            user=self.prompts.volume_chapters_user.format(
+                chapter_count=chapter_count,
+                volume_title=vol_title,
+                volume_arc=arc,
+                volume_ending=ending,
+                start_chapter_number=start_number,
+                entity_registry_block=entity_registry_block,
+                open_threads_block=open_threads_block,
+            ),
+            history=history,
+        )
+        with self.trace.begin(
+            "volume_chapters", project=self.project_name, volume=number
+        ) as t:
+            ch_data = self.llm.generate_json(messages2, temperature=0.7)
+            t.record(messages2, ch_data, model=self.llm.default_model)
+
+        chapters, w2 = _parse_volume_chapters_json(
+            ch_data,
+            volume=number,
+            start_number=start_number,
+            expected_count=chapter_count,
+            codex=self.codex,
+        )
+        warnings.extend(w2)
+
+        vol = VolumeOutline(
+            number=number,
+            title=vol_title,
+            arc=arc,
+            ending=ending,
+            chapters=[c.number for c in chapters],
+            recap="",
+        )
         if persist:
             self.outline.write_volume(vol)
-        return vol
+            for ch in chapters:
+                self.outline.write_chapter(ch)
+            self.outline.sync_volume_chapters(number)
+        return VolumePlanResult(volume=vol, chapters=chapters, warnings=warnings)
 
     # ------------------------------------------------------------------
     # Chapter beats
@@ -174,25 +233,32 @@ class Planner:
         Injects the existing codex entity list into the prompt, then resolves
         every entity id in the LLM's output against the codex so that
         fragmented ids collapse to their canonical form.
-        """
-        synopsis = self.outline.read_synopsis().strip()
-        volume_arc = ""
-        if volume is not None:
-            vol = self.outline.read_volume(volume)
-            if vol:
-                volume_arc = vol.arc.strip()
 
+        A volume must be specified (or inferred from an existing chapter when
+        regenerating). Planning chapters without a volume is forbidden.
+        """
         # Include chapters up to and including *number* so that regenerating
         # an already-written chapter's outline sees what already happened,
         # not just the chapters before it.
         prev = self.outline.list_chapters()
+        current_chapter = next((c for c in prev if c.number == number), None)
+
+        # When regenerating, fall back to the chapter's existing volume.
+        if volume is None and current_chapter is not None:
+            volume = current_chapter.volume
+        if volume is None:
+            raise ValueError("必须指定所属卷：禁止在没有卷的情况下规划章节")
+        vol = self.outline.read_volume(volume)
+        if vol is None:
+            raise FileNotFoundError(f"第 {volume} 卷不存在，请先规划卷")
+        volume_arc = vol.arc.strip()
+
         prev_before = [c for c in prev if c.number < number]
         prev_desc = _format_prev_chapters(prev_before[-3:])
 
         # If this chapter already has an outline (e.g. regenerating),
         # include its existing summary so the LLM plans based on what
         # was already written, not as if the chapter is brand-new.
-        current_chapter = next((c for c in prev if c.number == number), None)
         existing_summary_block = ""
         existing_beats_block = ""
         if current_chapter:
@@ -202,6 +268,7 @@ class Planner:
                 beat_goals = "; ".join(b.goal for b in current_chapter.beats)
                 existing_beats_block = f"本章已有 beat（参考已有内容重新规划）：\n{beat_goals}\n\n"
 
+        synopsis = self.outline.read_synopsis().strip()
         entity_registry = self._format_entity_registry()
         open_threads = self._format_open_threads(number)
 
@@ -251,6 +318,7 @@ class Planner:
 
         if persist:
             self.outline.write_chapter(chapter)
+            self.outline.sync_volume_chapters(volume)
         return ChapterPlanResult(
             chapter=chapter,
             resolved_ids=resolved_ids,

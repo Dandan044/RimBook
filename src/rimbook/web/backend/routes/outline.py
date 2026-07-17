@@ -126,10 +126,10 @@ def plan_volume(req: PlanVolumeRequest, deps: ProjectDeps = Depends(get_project_
     """LLM-plan a volume. The volume number is auto-inferred."""
     existing = deps.outline.list_volumes()
     number = max((v.number for v in existing), default=0) + 1
-    task_registry.register(deps.project_dir.name, "plan_volume", None, "正在规划卷…")
+    task_registry.register(deps.project_dir.name, "plan_volume", None, "正在规划卷及全部章节…")
     try:
-        vol = deps.planner.plan_volume(number, title=req.title)
-        return _vol_out(vol)
+        result = deps.planner.plan_volume(number, title=req.title)
+        return _vol_out(result.volume)
     finally:
         task_registry.unregister(deps.project_dir.name, "plan_volume", None)
 

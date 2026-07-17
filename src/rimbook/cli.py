@@ -469,9 +469,13 @@ def outline_volume(
 ) -> None:
     """规划一卷的大纲。"""
     deps = _load_deps(project)
-    console.print(f"[cyan]正在规划第 {number} 卷…[/cyan]")
-    vol = deps.planner.plan_volume(number, title=title)
+    console.print(f"[cyan]正在规划第 {number} 卷及全部章节…[/cyan]")
+    result = deps.planner.plan_volume(number, title=title)
+    vol = result.volume
     console.print(Panel(vol.arc, title=f"第 {number} 卷《{vol.title}》大纲"))
+    if result.chapters:
+        console.print(f"[green]已生成 {len(result.chapters)} 章 beat：[/green] "
+                      f"{', '.join(str(c.number) for c in result.chapters)}")
 
 
 @outline_app.command("chapter")

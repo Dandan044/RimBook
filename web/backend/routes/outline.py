@@ -111,8 +111,8 @@ def plan_volume(req: PlanVolumeRequest, deps: ProjectDeps = Depends(get_project_
     """LLM-plan a volume. The volume number is auto-inferred."""
     existing = deps.outline.list_volumes()
     number = max((v.number for v in existing), default=0) + 1
-    vol = deps.planner.plan_volume(number, title=req.title)
-    return _vol_out(vol)
+    result = deps.planner.plan_volume(number, title=req.title)
+    return _vol_out(result.volume)
 
 
 @router.get("/volumes/{number}", response_model=VolumeOutlineOut | None)
