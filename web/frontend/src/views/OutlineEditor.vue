@@ -145,7 +145,7 @@
               <div class="editor-body">
                 <el-form label-width="60px">
                   <el-form-item label="标题"><el-input v-model="chapterForm.title" /></el-form-item>
-                  <el-form-item label="卷"><el-input-number v-model="chapterForm.volume" :min="0" /></el-form-item>
+                  <el-form-item label="卷"><el-input-number v-model="chapterForm.volume" :min="1" /></el-form-item>
                   <el-form-item label="实体">
                     <el-select v-model="chapterForm.entities" multiple filterable allow-create default-first-option />
                   </el-form-item>
