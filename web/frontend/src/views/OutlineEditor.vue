@@ -98,9 +98,6 @@
                   <el-icon class="editor-title-icon"><Folder /></el-icon>
                   第{{ editingVolume.number }}卷《{{ editingVolume.title }}》
                 </h2>
-                <el-button type="danger" size="small" plain :loading="deleting" @click="confirmDeleteVolume">
-                  <el-icon><Delete /></el-icon> 删除卷
-                </el-button>
               </div>
               <div class="editor-body">
                 <el-form :model="volumeForm" label-width="60px">
@@ -123,6 +120,9 @@
                   <el-button type="primary" @click="saveVolume">
                     <el-icon><Check /></el-icon> 保存
                   </el-button>
+                  <el-button type="danger" plain :loading="deleting" @click="confirmDeleteVolume">
+                    <el-icon><Delete /></el-icon> 删除卷
+                  </el-button>
                 </div>
               </div>
             </div>
@@ -133,14 +133,9 @@
                   <el-icon class="editor-title-icon"><EditPen /></el-icon>
                   第{{ editingChapter.number }}章《{{ editingChapter.title }}》
                 </h2>
-                <div class="editor-header-actions">
-                  <el-button size="small" @click="generateBeat" :loading="generating">
-                    <el-icon><MagicStick /></el-icon> LLM 生成 Beat
-                  </el-button>
-                  <el-button type="danger" size="small" plain :loading="deleting" @click="confirmDeleteChapter">
-                    <el-icon><Delete /></el-icon> 删除章
-                  </el-button>
-                </div>
+                <el-button size="small" @click="generateBeat" :loading="generating">
+                  <el-icon><MagicStick /></el-icon> LLM 生成 Beat
+                </el-button>
               </div>
               <div class="editor-body">
                 <el-form label-width="60px">
@@ -207,6 +202,9 @@
                 <div class="editor-footer">
                   <el-button type="primary" @click="saveChapter">
                     <el-icon><Check /></el-icon> 保存
+                  </el-button>
+                  <el-button type="danger" plain :loading="deleting" @click="confirmDeleteChapter">
+                    <el-icon><Delete /></el-icon> 删除章
                   </el-button>
                 </div>
               </div>
