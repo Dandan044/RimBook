@@ -85,8 +85,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "system",
         "zh_name": "卷大纲 · 系统",
         "zh_module": "卷大纲",
-        "description": "规划「卷大纲」时的系统提示：定位资深小说策划，"
-        "含张力曲线与伏笔规划，400-600 字。",
+        "description": "规划「卷大纲」Turn1 的系统提示：定位资深小说策划，"
+        "要求仅输出 JSON（title/arc/ending/chapter_count），含张力曲线与伏笔规划。",
         "placeholders": [],
         "in_use": True,
     },
@@ -95,7 +95,8 @@ PROMPT_META: dict[str, dict[str, Any]] = {
         "role": "user",
         "zh_name": "卷大纲 · 用户",
         "zh_module": "卷大纲",
-        "description": "规划某一卷的用户消息，注入全书梗概、已有卷目、前卷章节回顾、已有实体清单、未回收线索与卷号/标题。",
+        "description": "规划某一卷 Turn1 的用户消息，注入全书梗概、已有卷目、前卷章节回顾、"
+        "已有实体清单、未回收线索与卷号/标题；要求仅输出卷结构 JSON。",
         "placeholders": [
             _ph("synopsis", "全书梗概", "outline.read_synopsis()"),
             _ph("existing_desc", "已规划的卷目列表", "outline.list_volumes() 格式化"),
@@ -104,6 +105,34 @@ PROMPT_META: dict[str, dict[str, Any]] = {
             _ph("open_threads_block", "未回收的情节线索（本卷应推进或回收）", "threads.format_open_threads()"),
             _ph("number", "本卷序号", "用户指定的卷号"),
             _ph("title_hint", "可能的标题注脚（形如“（标题：xx）”，无则空）", "卷标题"),
+        ],
+        "in_use": True,
+    },
+    "volume_chapters_system": {
+        "stage": STAGE_PLANNING,
+        "role": "system",
+        "zh_name": "卷内全章 beat · 系统",
+        "zh_module": "卷大纲",
+        "description": "规划卷内全部章节 beat（Turn2）的系统提示：定义每章节奏字段、"
+        "卷内因果衔接、实体 id 复用规则与 chapters 数组 JSON 输出格式。",
+        "placeholders": [],
+        "in_use": True,
+    },
+    "volume_chapters_user": {
+        "stage": STAGE_PLANNING,
+        "role": "user",
+        "zh_name": "卷内全章 beat · 用户",
+        "zh_module": "卷大纲",
+        "description": "规划卷内全部章节 beat（Turn2）的用户消息，注入卷标题/弧线/ending、"
+        "章数、起始章号、已有实体清单与未回收线索；要求恰好 chapter_count 章。",
+        "placeholders": [
+            _ph("volume_title", "本卷标题", "Turn1 解析的 title"),
+            _ph("volume_arc", "本卷弧线叙述", "Turn1 解析的 arc"),
+            _ph("volume_ending", "本卷收束与衔接下卷", "Turn1 解析的 ending"),
+            _ph("chapter_count", "本卷应产出的章数", "Turn1 解析并 clamp 后的 chapter_count"),
+            _ph("start_chapter_number", "本卷第一章的起始章号", "已有章节最大号 + 1"),
+            _ph("entity_registry_block", "已有实体清单块（含标题行，无则空）", "codex.iter_all()"),
+            _ph("open_threads_block", "未回收情节线索块（含标题行，无则空）", "threads.format_open_threads()"),
         ],
         "in_use": True,
     },
@@ -648,6 +677,10 @@ def render_preview(
         "samples": chapter_text[:2000] if chapter_text else "（占位示例：章节正文样本）",
         "volume_number": "1",
         "volume_title": "",
+        "volume_arc": "（占位示例：本卷弧线）",
+        "volume_ending": "（占位示例：本卷收束）",
+        "chapter_count": "6",
+        "start_chapter_number": "1",
         "chapter_summaries": "（占位示例：该卷各章摘要）",
         "prev_upto": "0",
         "previous": "（尚无，故事刚开始）",

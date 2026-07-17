@@ -23,7 +23,7 @@ from ..llm.trace import NULL_TRACE, TraceStore
 from ..memory.threads import ThreadStore
 from ..outline import ChapterOutline, OutlineStore, SceneBeat, VolumeOutline
 
-__all__ = ["Planner", "ChapterPlanResult"]
+__all__ = ["Planner", "ChapterPlanResult", "VolumePlanResult"]
 
 
 @dataclass
@@ -34,6 +34,15 @@ class ChapterPlanResult:
     resolved_ids: list[str] = field(default_factory=list)
     new_entity_ids: list[str] = field(default_factory=list)
     id_warnings: list[str] = field(default_factory=list)
+
+
+@dataclass
+class VolumePlanResult:
+    """Outcome of planning a volume together with its chapter beats."""
+
+    volume: VolumeOutline
+    chapters: list[ChapterOutline]
+    warnings: list[str] = field(default_factory=list)
 
 
 class Planner:
@@ -300,6 +309,78 @@ def _format_prev_chapters(chapters: list[ChapterOutline]) -> str:
             + (f"；摘要：{c.summary.strip()}" if c.summary.strip() else "")
         )
     return "\n".join(parts)
+
+
+def _parse_volume_json(
+    data: dict,
+    *,
+    number: int,
+    title_hint: str = "",
+) -> tuple[str, str, str, int, list[str]]:
+    """Return ``(title, arc, ending, chapter_count, warnings)``.
+
+    ``ending`` must be non-empty. ``chapter_count`` is clamped to ``[3, 20]``
+    with a soft warning when the raw value is outside that range.
+    """
+    warnings: list[str] = []
+    title = (title_hint or "").strip() or str(data.get("title", "") or "").strip()
+    arc = str(data.get("arc", "") or "").strip()
+    ending = str(data.get("ending", "") or "").strip()
+    if not ending:
+        raise ValueError(f"第 {number} 卷规划缺少 ending")
+
+    raw_count = data.get("chapter_count", 6)
+    try:
+        chapter_count = int(raw_count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"第 {number} 卷无效的 chapter_count: {raw_count!r}") from exc
+
+    if chapter_count < 3 or chapter_count > 20:
+        clamped = min(max(chapter_count, 3), 20)
+        warnings.append(
+            f"chapter_count={chapter_count} 超出建议范围 [3, 20]，已钳制为 {clamped}"
+        )
+        chapter_count = clamped
+
+    return title, arc, ending, chapter_count, warnings
+
+
+def _parse_volume_chapters_json(
+    data: dict,
+    *,
+    volume: int,
+    start_number: int,
+    expected_count: int,
+    codex: CodexStore | None,
+) -> tuple[list[ChapterOutline], list[str]]:
+    """Parse a ``chapters`` array; assign numbers ``start_number``.. sequentially.
+
+    Reuses :func:`_parse_chapter_json` per item. Raises ``ValueError`` when the
+    array length does not match ``expected_count``.
+    """
+    raw = data.get("chapters")
+    if not isinstance(raw, list):
+        raise ValueError("卷章节规划缺少 chapters 数组")
+    if len(raw) != expected_count:
+        raise ValueError(
+            f"卷章节数量不符：期望 {expected_count}，实际 {len(raw)}"
+        )
+
+    chapters: list[ChapterOutline] = []
+    warnings: list[str] = []
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(f"第 {i + 1} 个章节项不是对象")
+        chapter, w = _parse_chapter_json(
+            start_number + i,
+            item,
+            volume=volume,
+            title="",
+            codex=codex,
+        )
+        chapters.append(chapter)
+        warnings.extend(w)
+    return chapters, warnings
 
 
 def _parse_chapter_json(
