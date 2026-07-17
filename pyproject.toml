@@ -27,5 +27,12 @@ dependencies = [
 rimbook = "rimbook.cli:app"
 rimbook-web = "rimbook.web:main"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/rimbook"]

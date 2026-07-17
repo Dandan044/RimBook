@@ -113,6 +113,19 @@ class OutlineStore:
                 out.append(vol)
         return out
 
+    def sync_volume_chapters(self, volume_number: int) -> list[int]:
+        """Recompute VolumeOutline.chapters from ChapterOutline.volume pointers."""
+        vol = self.read_volume(volume_number)
+        if vol is None:
+            raise FileNotFoundError(f"Volume {volume_number} not found")
+        nums = sorted(
+            c.number for c in self.list_chapters() if c.volume == volume_number
+        )
+        if list(vol.chapters or []) != nums:
+            vol.chapters = nums
+            self.write_volume(vol)
+        return nums
+
     # ==================================================================
     # Chapters
     # ==================================================================
