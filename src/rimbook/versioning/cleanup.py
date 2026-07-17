@@ -84,20 +84,28 @@ def clean_story_so_far_post_chapter(outline: OutlineStore, number: int) -> bool:
 
 
 def clean_volume_recaps_post_chapter(outline: OutlineStore, number: int) -> int:
-    """Clear realized volume recaps that may include chapters >= *number*."""
+    """Clear realized volume recaps that may include chapters >= *number*.
+
+    Membership is resolved from chapter ``volume`` pointers first; the
+    ``VolumeOutline.chapters`` list is only a fallback. Empty membership no
+    longer clears recaps (avoids wiping unrelated volumes).
+    """
     cleared = 0
+    by_vol: dict[int, list[int]] = {}
+    for c in outline.list_chapters():
+        if c.volume is not None:
+            by_vol.setdefault(c.volume, []).append(c.number)
+
     for vol in outline.list_volumes():
         if not (vol.recap or "").strip():
             continue
-        chs = list(vol.chapters or [])
-        # Recap is unsafe if the volume contains any chapter >= N, or if
-        # membership is unknown (empty chapters list) while rolling back.
-        unsafe = (not chs) or any(c >= number for c in chs)
-        if not unsafe:
+        chs = by_vol.get(vol.number) or list(vol.chapters or [])
+        if not chs:
             continue
-        vol.recap = ""
-        outline.write_volume(vol)
-        cleared += 1
+        if any(c >= number for c in chs):
+            vol.recap = ""
+            outline.write_volume(vol)
+            cleared += 1
     if cleared:
         logger.info("Cleared %d volume recap(s) for chapters >= %d", cleared, number)
     return cleared

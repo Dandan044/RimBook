@@ -131,6 +131,8 @@ class OutlineStore:
     # ==================================================================
     def write_chapter(self, ch: ChapterOutline) -> Path:
         path = self.paths.chapter_outline(ch.number)
+        old = self.read_chapter(ch.number)
+        old_vol = old.volume if old else None
 
         post = frontmatter.Post(ch.notes or "")
         post.metadata = {
@@ -149,7 +151,57 @@ class OutlineStore:
             "elapsed": ch.elapsed,
         }
         atomic_write(path, frontmatter.dumps(post, sort_keys=False))
+        # Keep VolumeOutline.chapters aligned with chapter.volume pointers.
+        vols_to_sync: set[int] = set()
+        if ch.volume is not None:
+            vols_to_sync.add(ch.volume)
+        if old_vol is not None and old_vol != ch.volume:
+            vols_to_sync.add(old_vol)
+        for vn in vols_to_sync:
+            if self.read_volume(vn) is not None:
+                self.sync_volume_chapters(vn)
         return path
+
+    def delete_chapter(self, number: int) -> bool:
+        """Remove a chapter outline and related prose files; sync its volume.
+
+        Returns ``False`` if the chapter outline did not exist.
+        """
+        ch = self.read_chapter(number)
+        if ch is None:
+            return False
+        vol = ch.volume
+        self.paths.chapter_outline(number).unlink(missing_ok=True)
+        for p in (
+            self.paths.draft_file(number),
+            self.paths.final_file(number),
+            self.paths.context_snapshot_file(number),
+        ):
+            p.unlink(missing_ok=True)
+        if vol is not None and self.read_volume(vol) is not None:
+            self.sync_volume_chapters(vol)
+        return True
+
+    def delete_volume(self, number: int, *, cascade_chapters: bool = True) -> list[int]:
+        """Delete a volume outline. Optionally cascade-delete its chapters.
+
+        Returns the list of deleted chapter numbers.
+        """
+        vol = self.read_volume(number)
+        if vol is None:
+            raise FileNotFoundError(f"Volume {number} not found")
+        deleted: list[int] = []
+        members = [c.number for c in self.list_chapters() if c.volume == number]
+        if cascade_chapters:
+            for n in members:
+                if self.delete_chapter(n):
+                    deleted.append(n)
+        elif members:
+            raise ValueError(
+                f"第 {number} 卷仍有章节 {members}，请先删除章节或启用级联删除"
+            )
+        self.paths.volume_outline(number).unlink(missing_ok=True)
+        return deleted
 
     def read_chapter(self, number: int) -> ChapterOutline | None:
         path = self.paths.chapter_outline(number)

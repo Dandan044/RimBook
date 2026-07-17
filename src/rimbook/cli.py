@@ -463,35 +463,55 @@ def outline_synopsis(
 
 @outline_app.command("volume")
 def outline_volume(
-    number: int = typer.Argument(..., help="卷号"),
+    number: int = typer.Argument(..., help="卷号（必须尚不存在）"),
     title: str = typer.Option("", "--title", "-t"),
     project: Optional[Path] = typer.Option(None, "--project", "-p"),
 ) -> None:
-    """规划一卷的大纲。"""
+    """规划一卷大纲，并在同一次对话中生成该卷全部章节 beat。"""
     deps = _load_deps(project)
     console.print(f"[cyan]正在规划第 {number} 卷及全部章节…[/cyan]")
-    result = deps.planner.plan_volume(number, title=title)
+    try:
+        result = deps.planner.plan_volume(number, title=title)
+    except FileExistsError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
     vol = result.volume
     console.print(Panel(vol.arc, title=f"第 {number} 卷《{vol.title}》大纲"))
+    if vol.ending.strip():
+        console.print(Panel(vol.ending, title="卷结局 / 衔接"))
     if result.chapters:
-        console.print(f"[green]已生成 {len(result.chapters)} 章 beat：[/green] "
-                      f"{', '.join(str(c.number) for c in result.chapters)}")
+        lines = [
+            f"第{c.number}章《{c.title or '未命名'}》· {len(c.beats)} beats"
+            for c in result.chapters
+        ]
+        console.print("[green]已生成章节：[/green]\n  " + "\n  ".join(lines))
+    if result.warnings:
+        console.print("[yellow]提示：[/yellow]")
+        for w in result.warnings:
+            console.print(f"  • {w}")
 
 
 @outline_app.command("chapter")
 def outline_chapter(
     number: int = typer.Argument(..., help="章节号"),
-    volume: Optional[int] = typer.Option(None, "--volume", "-v", help="所属卷号"),
+    volume: int = typer.Option(..., "--volume", "-v", help="所属卷号（必填）"),
     title: str = typer.Option("", "--title", "-t"),
     hint: str = typer.Option("", "--hint", help="给规划的额外提示"),
     project: Optional[Path] = typer.Option(None, "--project", "-p"),
 ) -> None:
-    """规划一章的 beat（要发生什么）。"""
+    """规划一章的 beat（必须先有卷）。"""
     deps = _load_deps(project)
-    console.print(f"[cyan]正在规划第 {number} 章 beat…[/cyan]")
-    result = deps.planner.plan_chapter_detailed(
-        number, volume=volume, title=title, hint=hint
-    )
+    console.print(f"[cyan]正在规划第 {number} 章 beat（卷 {volume}）…[/cyan]")
+    try:
+        result = deps.planner.plan_chapter_detailed(
+            number, volume=volume, title=title, hint=hint
+        )
+    except (ValueError, FileNotFoundError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1) from e
     ch = result.chapter
     _print_chapter_plan(ch, deps)
     if result.id_warnings:
