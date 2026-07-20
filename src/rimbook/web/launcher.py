@@ -211,78 +211,48 @@ def _force_kill_pid(pid: int) -> None:
         pass
 
 
-def _pids_listening_on_rimbook_ports(
-    start: int = _DEFAULT_PORT, end: int = _PORT_RANGE_END
-) -> list[int]:
-    """Return PIDs listening on RimBook's default port range (python preferred)."""
-    pids: set[int] = set()
+def _cmdline_looks_like_rimbook(cmdline: str) -> bool:
+    """True only for RimBook web server invocations (not arbitrary Python apps)."""
+    cl = cmdline.lower()
+    return (
+        "rimbook.web" in cl
+        or "rimbook-web" in cl
+        or "rimbook.web.full_restart" in cl
+    )
+
+
+def _is_rimbook_server_pid(pid: int) -> bool:
+    """Confirm *pid* is a RimBook web server before we kill it."""
+    if pid <= 0:
+        return False
     try:
         import psutil
 
-        for conn in psutil.net_connections(kind="inet"):
-            try:
-                if conn.status != psutil.CONN_LISTEN:
-                    continue
-                if not conn.laddr:
-                    continue
-                port = int(conn.laddr.port)
-                if not (start <= port <= end):
-                    continue
-                if not conn.pid:
-                    continue
-                try:
-                    name = (psutil.Process(conn.pid).name() or "").lower()
-                except Exception:
-                    name = ""
-                # Prefer python listeners; still capture unknown names on our ports.
-                if name and "python" not in name and "uvicorn" not in name:
-                    continue
-                pids.add(int(conn.pid))
-            except Exception:
-                continue
-        return sorted(pids)
+        p = psutil.Process(pid)
+        name = (p.name() or "").lower()
+        if "python" not in name and "uvicorn" not in name:
+            return False
+        cmdline = " ".join(p.cmdline() or [])
+        return _cmdline_looks_like_rimbook(cmdline)
     except ImportError:
         pass
+    except Exception:
+        return False
 
-    if sys.platform == "win32":
-        try:
-            # netstat -ano: find LISTENING rows in our port range
-            result = subprocess.run(
-                ["netstat", "-ano"],
-                capture_output=True,
-                text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-                timeout=10,
-            )
-            for line in result.stdout.splitlines():
-                parts = line.split()
-                if len(parts) < 5 or parts[0] not in ("TCP", "UDP"):
-                    continue
-                if "LISTENING" not in parts and parts[0] == "TCP":
-                    continue
-                local = parts[1]
-                pid_str = parts[-1]
-                if ":" not in local:
-                    continue
-                try:
-                    port = int(local.rsplit(":", 1)[-1])
-                    pid = int(pid_str)
-                except ValueError:
-                    continue
-                if start <= port <= end and pid > 0:
-                    pids.add(pid)
-        except Exception:
-            pass
-    return sorted(pids)
+    # Fallback without psutil: only trust PIDs already discovered by cmdline scan.
+    return pid in set(_find_all_rimbook_pids())
 
 
 def kill_all_rimbook_processes(*, exclude_pid: int | None = None) -> int:
-    """Kill every RimBook server process found on this machine, tracked or not.
+    """Kill every RimBook web-server process found on this machine.
 
     Unlike :func:`stop_server` (which only stops the PID recorded in
     ``server.pid``), this scans the full process list so stray instances from
-    previous days/crashes are cleaned up too. Also clears Python listeners on
-    the RimBook port range (8000–8099) to prevent duplicate binds.
+    previous days/crashes are cleaned up too.
+
+    Safety: only processes whose command line contains ``rimbook.web`` /
+    ``rimbook-web`` are targeted. Other Python apps on ports 8000–8099 are
+    **not** killed.
 
     Returns the number of processes killed. Safe to call when nothing is
     running (returns ``0``).
@@ -290,11 +260,8 @@ def kill_all_rimbook_processes(*, exclude_pid: int | None = None) -> int:
     my_pid = os.getpid()
     pids = {
         pid for pid in _find_all_rimbook_pids()
-        if pid != my_pid and pid != exclude_pid
+        if pid != my_pid and pid != exclude_pid and _is_rimbook_server_pid(pid)
     }
-    for pid in _pids_listening_on_rimbook_ports():
-        if pid != my_pid and pid != exclude_pid:
-            pids.add(pid)
 
     if not pids:
         _delete_pid_files()
