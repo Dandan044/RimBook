@@ -197,19 +197,105 @@ def _find_all_rimbook_pids() -> list[int]:
     return pids
 
 
+def _force_kill_pid(pid: int) -> None:
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/F", "/PID", str(pid), "/T"],
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        else:
+            os.kill(pid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _pids_listening_on_rimbook_ports(
+    start: int = _DEFAULT_PORT, end: int = _PORT_RANGE_END
+) -> list[int]:
+    """Return PIDs listening on RimBook's default port range (python preferred)."""
+    pids: set[int] = set()
+    try:
+        import psutil
+
+        for conn in psutil.net_connections(kind="inet"):
+            try:
+                if conn.status != psutil.CONN_LISTEN:
+                    continue
+                if not conn.laddr:
+                    continue
+                port = int(conn.laddr.port)
+                if not (start <= port <= end):
+                    continue
+                if not conn.pid:
+                    continue
+                try:
+                    name = (psutil.Process(conn.pid).name() or "").lower()
+                except Exception:
+                    name = ""
+                # Prefer python listeners; still capture unknown names on our ports.
+                if name and "python" not in name and "uvicorn" not in name:
+                    continue
+                pids.add(int(conn.pid))
+            except Exception:
+                continue
+        return sorted(pids)
+    except ImportError:
+        pass
+
+    if sys.platform == "win32":
+        try:
+            # netstat -ano: find LISTENING rows in our port range
+            result = subprocess.run(
+                ["netstat", "-ano"],
+                capture_output=True,
+                text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                timeout=10,
+            )
+            for line in result.stdout.splitlines():
+                parts = line.split()
+                if len(parts) < 5 or parts[0] not in ("TCP", "UDP"):
+                    continue
+                if "LISTENING" not in parts and parts[0] == "TCP":
+                    continue
+                local = parts[1]
+                pid_str = parts[-1]
+                if ":" not in local:
+                    continue
+                try:
+                    port = int(local.rsplit(":", 1)[-1])
+                    pid = int(pid_str)
+                except ValueError:
+                    continue
+                if start <= port <= end and pid > 0:
+                    pids.add(pid)
+        except Exception:
+            pass
+    return sorted(pids)
+
+
 def kill_all_rimbook_processes(*, exclude_pid: int | None = None) -> int:
     """Kill every RimBook server process found on this machine, tracked or not.
 
     Unlike :func:`stop_server` (which only stops the PID recorded in
     ``server.pid``), this scans the full process list so stray instances from
-    previous days/crashes are cleaned up too. Returns the number of processes
-    killed. Safe to call when nothing is running (returns ``0``).
+    previous days/crashes are cleaned up too. Also clears Python listeners on
+    the RimBook port range (8000–8099) to prevent duplicate binds.
+
+    Returns the number of processes killed. Safe to call when nothing is
+    running (returns ``0``).
     """
     my_pid = os.getpid()
-    pids = [
-        pid for pid in set(_find_all_rimbook_pids())
+    pids = {
+        pid for pid in _find_all_rimbook_pids()
         if pid != my_pid and pid != exclude_pid
-    ]
+    }
+    for pid in _pids_listening_on_rimbook_ports():
+        if pid != my_pid and pid != exclude_pid:
+            pids.add(pid)
+
     if not pids:
         _delete_pid_files()
         return 0
@@ -223,19 +309,8 @@ def kill_all_rimbook_processes(*, exclude_pid: int | None = None) -> int:
 
     # Anything still alive after the graceful wait gets force-killed.
     for pid in pids:
-        if not _is_process_running(pid):
-            continue
-        try:
-            if sys.platform == "win32":
-                subprocess.run(
-                    ["taskkill", "/F", "/PID", str(pid), "/T"],
-                    capture_output=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            else:
-                os.kill(pid, signal.SIGKILL)
-        except Exception:
-            pass
+        if _is_process_running(pid):
+            _force_kill_pid(pid)
 
     _delete_pid_files()
     return len(pids)
@@ -442,13 +517,181 @@ def restart_server(
     port: int | None = None,
     *,
     open_browser: bool = True,
+    rebuild: bool = True,
 ) -> dict[str, Any]:
-    """Stop (if running) and then re-start the server.
+    """Full restart: kill all instances, rebuild frontend, start fresh.
 
-    Parameters match :func:`start_server`.
+    Prefer this over a bare stop/start when the caller is *outside* the
+    running server process. In-app Restart uses
+    :func:`spawn_full_restart_supervisor` instead (the server cannot rebuild
+    itself after it has already exited).
     """
-    stop_server()
-    return start_server(workspace=workspace, port=port, open_browser=open_browser)
+    return run_full_restart_job(
+        workspace=workspace,
+        port=port,
+        open_browser=open_browser,
+        wait_pid=None,
+        rebuild=rebuild,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Full restart (kill-all + frontend rebuild + relaunch)
+# ---------------------------------------------------------------------------
+_RESTART_LOG = _RIMBOOK_DIR / "full_restart.log"
+
+
+def find_repo_root() -> Path | None:
+    """Locate the RimBook repo root (directory containing ``web/frontend``)."""
+    candidates: list[Path] = []
+    env = os.environ.get("RIMBOOK_WORKSPACE")
+    if env:
+        candidates.append(Path(env).resolve())
+    candidates.extend(Path(__file__).resolve().parents)
+    candidates.append(Path.cwd().resolve())
+    seen: set[Path] = set()
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        if (c / "web" / "frontend" / "package.json").is_file():
+            return c
+    return None
+
+
+def _append_restart_log(msg: str) -> None:
+    try:
+        _ensure_data_dir()
+        with _RESTART_LOG.open("a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
+
+
+def rebuild_frontend(repo_root: Path | None = None, *, timeout: int = 300) -> Path:
+    """Run ``npm run build`` so ``static/`` picks up the latest Vue sources.
+
+    Returns the static output directory. Raises ``RuntimeError`` on failure.
+    """
+    root = repo_root or find_repo_root()
+    if root is None:
+        raise RuntimeError("找不到前端工程目录（web/frontend/package.json）")
+    frontend = root / "web" / "frontend"
+    static_dir = root / "src" / "rimbook" / "web" / "backend" / "static"
+    npm = "npm.cmd" if sys.platform == "win32" else "npm"
+    _append_restart_log(f"rebuild_frontend cwd={frontend}")
+    kwargs: dict[str, Any] = {
+        "cwd": str(frontend),
+        "capture_output": True,
+        "text": True,
+        "timeout": timeout,
+        "encoding": "utf-8",
+        "errors": "replace",
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+    result = subprocess.run([npm, "run", "build"], **kwargs)
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "")[-2000:]
+        _append_restart_log(f"rebuild FAILED: {tail}")
+        raise RuntimeError(f"前端构建失败（exit {result.returncode}）：{tail}")
+    if not static_dir.exists() or not any(static_dir.iterdir()):
+        raise RuntimeError(f"前端构建完成但未找到产物目录：{static_dir}")
+    _append_restart_log(f"rebuild OK → {static_dir}")
+    return static_dir
+
+
+def run_full_restart_job(
+    *,
+    workspace: str | None = None,
+    port: int | None = None,
+    open_browser: bool = True,
+    wait_pid: int | None = None,
+    rebuild: bool = True,
+) -> dict[str, Any]:
+    """Synchronous full restart used by the detached supervisor (and CLI)."""
+    _append_restart_log(
+        f"full_restart begin wait_pid={wait_pid} port={port} rebuild={rebuild}"
+    )
+
+    if wait_pid is not None:
+        deadline = time.time() + _STOP_WAIT_SEC + 2.0
+        while _is_process_running(wait_pid) and time.time() < deadline:
+            time.sleep(0.2)
+        if _is_process_running(wait_pid):
+            _force_kill_pid(wait_pid)
+            time.sleep(0.3)
+
+    killed = kill_all_rimbook_processes(exclude_pid=os.getpid())
+    _append_restart_log(f"killed {killed} process(es)")
+
+    # Give sockets a moment to release after force-kill.
+    time.sleep(0.5)
+
+    if rebuild:
+        rebuild_frontend()
+
+    info = start_server(
+        workspace=workspace,
+        port=port,
+        open_browser=open_browser,
+        force_restart=True,
+    )
+    _append_restart_log(f"full_restart done url={info.get('url')} pid={info.get('pid')}")
+    return info
+
+
+def spawn_full_restart_supervisor(
+    *,
+    workspace: str | None = None,
+    port: int | None = None,
+    open_browser: bool = True,
+    wait_pid: int | None = None,
+    rebuild: bool = True,
+) -> int:
+    """Spawn a detached supervisor that performs :func:`run_full_restart_job`.
+
+    Returns the supervisor PID. The caller (usually the dying server) should
+    exit shortly after so the supervisor can take over.
+    """
+    python_exe = sys.executable
+    cmd = [
+        python_exe,
+        "-m",
+        "rimbook.web.full_restart",
+    ]
+    if workspace:
+        cmd.extend(["--workspace", str(Path(workspace).resolve())])
+    if port is not None:
+        cmd.extend(["--port", str(port)])
+    if wait_pid is not None:
+        cmd.extend(["--wait-pid", str(wait_pid)])
+    if not open_browser:
+        cmd.append("--no-browser")
+    if not rebuild:
+        cmd.append("--skip-build")
+
+    _ensure_data_dir()
+    log_fh = _RESTART_LOG.open("a", encoding="utf-8")
+    kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": log_fh,
+        "stderr": log_fh,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        kwargs["creationflags"] = 0x00000008 | 0x00000200 | subprocess.CREATE_NO_WINDOW
+    else:
+        kwargs["start_new_session"] = True
+
+    _append_restart_log(f"spawn supervisor: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        log_fh.close()
+    except OSError:
+        pass
+    return proc.pid
 
 
 # ---------------------------------------------------------------------------

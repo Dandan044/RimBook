@@ -476,6 +476,8 @@ export interface ServerResult {
   url?: string
   action?: string
   error?: string
+  message?: string
+  supervisor_pid?: number
 }
 
 export const getServerStatus = () =>

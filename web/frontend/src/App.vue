@@ -112,6 +112,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import {
   getServerStatus,
   startServer,
@@ -189,7 +190,7 @@ const serverDotClass = computed(() => {
 const serverLabel = computed(() => {
   if (serverActionLoading.value === 'start') return '正在启动…'
   if (serverActionLoading.value === 'stop') return '正在停止…'
-  if (serverActionLoading.value === 'restart') return '正在重启…'
+  if (serverActionLoading.value === 'restart') return '完整重启中…'
   if (serverStatus.value?.running) {
     const port = serverStatus.value.port
     return port ? `服务运行中 :${port}` : '服务运行中'
@@ -254,16 +255,44 @@ async function doStopServer() {
   }
 }
 
+async function sleep(ms: number) {
+  await new Promise((r) => setTimeout(r, ms))
+}
+
 async function doRestartServer() {
   serverActionLoading.value = 'restart'
+  ElMessage.info('完整重启：清理进程 → 重建前端 → 重新启动（约 1 分钟）')
+  let expectedUrl: string | undefined
   try {
-    const result = await restartServer()
-    if (result.url) {
-      window.open(result.url, '_blank')
+    try {
+      const result = await restartServer()
+      expectedUrl = result.url
+    } catch (e: any) {
+      // Server may die before the response arrives — supervisor still runs.
+      console.warn('restart request ended early (expected during full restart):', e)
     }
+
+    // Poll until the new server is up, then open the UI.
+    const deadline = Date.now() + 180_000
+    while (Date.now() < deadline) {
+      await sleep(2000)
+      try {
+        const s = await getServerStatus()
+        if (s.running && s.url) {
+          serverStatus.value = s
+          window.open(s.url, '_blank')
+          ElMessage.success('重启完成，已打开前端')
+          return
+        }
+      } catch {
+        // still down — keep waiting
+      }
+    }
+    if (expectedUrl) {
+      window.open(expectedUrl, '_blank')
+    }
+    ElMessage.warning('重启耗时较长，请手动刷新或查看 ~/.rimbook/full_restart.log')
     await fetchServerStatus()
-  } catch (e: any) {
-    console.error('Failed to restart server:', e)
   } finally {
     serverActionLoading.value = null
   }
