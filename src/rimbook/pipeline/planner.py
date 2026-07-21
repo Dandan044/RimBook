@@ -27,6 +27,7 @@ from ..outline import (
     ChapterOutline, OutlineStore, SceneBeat, VolumeOutline,
     RawBeat, RefinedBeat, ChapterAssignment, VolumeBeatData, MicroScene,
 )
+from ..planning_entities import EntityNetworkChanges, EntityNetworkService
 
 __all__ = ["Planner", "ChapterPlanResult", "VolumePlanResult"]
 
@@ -60,6 +61,7 @@ class Planner:
         outline: OutlineStore,
         codex: CodexStore | None = None,
         *,
+        planning_entities: EntityNetworkService | None = None,
         threads: ThreadStore | None = None,
         trace: TraceStore | None = None,
         project_name: str = "",
@@ -68,6 +70,7 @@ class Planner:
         self.prompts = prompts
         self.outline = outline
         self.codex = codex
+        self.planning_entities = planning_entities
         self.threads = threads
         self.trace = trace if trace is not None else NULL_TRACE
         self.project_name = project_name
@@ -218,16 +221,37 @@ class Planner:
         if self.outline.read_volume(number) is not None:
             raise FileExistsError(f"第 {number} 卷已存在，禁止重复规划")
 
-        # === Step 1: Volume structure ===
-        yield {"event": "step", "data": {"step": 1, "status": "running", "message": "正在生成卷大纲与结局…"}}
-
         synopsis = self.outline.read_synopsis().strip()
         existing = self.outline.list_volumes()
         existing_desc = _format_existing_volumes(existing)
         prev = self.outline.list_chapters()
         prev_recap = _format_prev_chapters(prev[-8:]) if prev else ""
-        entity_registry = self._format_entity_registry()
         max_chapter = max((c.number for c in prev), default=0)
+
+        # === Step 0: Reconcile the existing story into author-side entities ===
+        if self.planning_entities is not None:
+            yield {"event": "step", "data": {
+                "step": 0, "status": "running",
+                "message": "正在根据已有剧情同步幕后实体与关系网…",
+            }}
+            story_context = (
+                f"全书梗概：\n{synopsis}\n\n"
+                f"既有卷：\n{existing_desc or '（无）'}\n\n"
+                f"近八章剧情：\n{prev_recap or '（尚无章节）'}"
+            )
+            sync_result = self._sync_planning_entities(
+                story_context=story_context, source="story_backfill", volume=number,
+            )
+            yield {"event": "step", "data": {
+                "step": 0, "status": "done",
+                "message": f"幕后实体同步完成（{sync_result.get('change_count', 0)} 项变更）",
+                "changes": sync_result,
+            }}
+
+        # === Step 1: Volume structure ===
+        yield {"event": "step", "data": {"step": 1, "status": "running", "message": "正在生成卷大纲与结局…"}}
+
+        entity_registry = self._format_entity_registry()
         open_threads = self._format_open_threads(max_chapter + 1)
 
         entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
@@ -259,11 +283,19 @@ class Planner:
 
         vol = VolumeOutline(number=number, title=vol_title, arc=arc, ending=ending, chapters=[], recap="")
         self.outline.write_volume(vol)
+        volume_entity_changes = self._apply_planning_entity_changes(
+            vol_data, source="volume_outline"
+        )
+        # Step 2 must see any cast introduced by the volume outline rather
+        # than inventing a motive-less id and patching it in afterwards.
+        entity_registry = self._format_entity_registry()
+        entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
 
         yield {"event": "step", "data": {
             "step": 1, "status": "done",
             "message": "卷大纲已生成",
             "volume": {"number": number, "title": vol_title, "arc": arc, "ending": ending, "chapter_count": chapter_count},
+            "entity_changes": volume_entity_changes,
         }}
 
         # === Step 2: Continuous beat chain ===
@@ -292,9 +324,15 @@ class Planner:
             beats_data = self.llm.generate_json(messages2, temperature=0.7)
             t.record(messages2, beats_data, model=self.llm.default_model)
 
-        raw_beats = _parse_raw_beats(beats_data, codex=self.codex)
+        raw_beats = _parse_raw_beats(
+            beats_data,
+            codex=None if self.planning_entities is not None else self.codex,
+        )
         if len(raw_beats) < min_beats:
             warnings.append(f"beat 数量 {len(raw_beats)} 低于建议下限 {min_beats}")
+        beat_entity_changes = self._apply_planning_entity_changes(
+            beats_data, source="volume_beats"
+        )
 
         # Persist beats (step=2)
         beat_data = VolumeBeatData(volume=number, step=2, raw_beats=raw_beats)
@@ -304,6 +342,7 @@ class Planner:
             "step": 2, "status": "done",
             "message": f"已生成 {len(raw_beats)} 个 beat",
             "beats": [b.model_dump() for b in raw_beats],
+            "entity_changes": beat_entity_changes,
         }}
 
         # === Step 3: Refine + Assemble ===
@@ -385,6 +424,11 @@ class Planner:
                 volume_title=vol_title,
                 volume_arc=arc,
                 volume_ending=ending,
+                entity_brief_block=(
+                    f"{self._format_planning_entity_brief(volume=number)}\n\n"
+                    if self.planning_entities is not None
+                    else ""
+                ),
                 beat_count=len(raw_beats),
                 chapter_count=chapter_count,
                 beats_json=beats_json,
@@ -492,6 +536,14 @@ class Planner:
                 chapter_title=ca.title or "",
                 chapter_purpose=ca.purpose or "",
                 chapter_hook=ca.hook or "",
+                entity_brief_block=(
+                    f"{self._format_planning_entity_brief(
+                        [entity for beat in chapter_beats for entity in beat.entities],
+                        volume=number,
+                    )}\n\n"
+                    if self.planning_entities is not None
+                    else ""
+                ),
                 keynote_block=keynote_block,
                 beats_json=beats_json,
             ),
@@ -588,6 +640,16 @@ class Planner:
                 existing_beats_block = f"本章已有 beat（参考已有内容重新规划）：\n{beat_goals}\n\n"
 
         synopsis = self.outline.read_synopsis().strip()
+        if self.planning_entities is not None:
+            self._sync_planning_entities(
+                story_context=(
+                    f"全书梗概：\n{synopsis}\n\n"
+                    f"本卷大纲：\n{volume_arc}\n\n"
+                    f"已发生章节：\n{_format_prev_chapters(prev_before[-8:]) or '（尚无）'}"
+                ),
+                source="story_backfill",
+                volume=volume,
+            )
         entity_registry = self._format_entity_registry()
         open_threads = self._format_open_threads(number)
 
@@ -618,8 +680,13 @@ class Planner:
             result = self.llm.generate_json(messages, temperature=0.7)
             t.record(messages, result, model=self.llm.default_model)
         chapter, warnings = _parse_chapter_json(
-            number, result, volume=volume, title=title, codex=self.codex
+            number,
+            result,
+            volume=volume,
+            title=title,
+            codex=None if self.planning_entities is not None else self.codex,
         )
+        self._apply_planning_entity_changes(result, source="chapter_plan")
 
         # Preserve the existing summary so regeneration doesn't wipe it.
         if current_chapter and current_chapter.summary.strip():
@@ -628,7 +695,7 @@ class Planner:
         # Collect diagnostics about new vs reused ids.
         resolved_ids: list[str] = []
         new_ids: list[str] = []
-        if self.codex is not None:
+        if self.codex is not None and self.planning_entities is None:
             all_ids = chapter.all_entities()
             resolved_ids, log = resolve_entity_ids(all_ids, self.codex)
             for r in log:
@@ -654,18 +721,90 @@ class Planner:
         except Exception:
             return ""
 
+    def sync_planning_entities(self, *, volume: int | None = None) -> dict[str, object]:
+        """Manually reconcile the author-side entity network from story state."""
+        if self.planning_entities is None:
+            return {}
+        chapters = self.outline.list_chapters()
+        volume_outline = self.outline.read_volume(volume) if volume is not None else None
+        story_context = (
+            f"全书梗概：\n{self.outline.read_synopsis().strip()}\n\n"
+            f"本卷大纲：\n{volume_outline.arc if volume_outline else '（未指定）'}\n\n"
+            f"已发生章节：\n{_format_prev_chapters(chapters[-8:]) or '（尚无）'}"
+        )
+        return self._sync_planning_entities(
+            story_context=story_context,
+            source="story_backfill",
+            volume=volume,
+        )
+
+    def _sync_planning_entities(
+        self,
+        *,
+        story_context: str,
+        source: str,
+        volume: int | None = None,
+    ) -> dict[str, object]:
+        """Ask the author-side entity service to reconcile existing story facts.
+
+        This is intentionally separate from Codex enrichment: its output is
+        author-only and may contain motivations or unrevealed future arcs.
+        """
+        if self.planning_entities is None:
+            return {}
+        network = self.planning_entities.render_brief(volume_number=volume)
+        messages = self.llm.as_chat(
+            system=self.prompts.entity_sync_system,
+            user=self.prompts.entity_sync_user.format(
+                entity_network=network,
+                story_context=story_context or "（尚无已发生剧情，请只建立确有必要的初始主体。）",
+            ),
+        )
+        with self.trace.begin(
+            "planning_entity_sync",
+            project=self.project_name,
+            volume=volume,
+            source=source,
+        ) as trace:
+            data = self.llm.generate_json(messages, temperature=0.4)
+            trace.record(messages, data, model=self.llm.default_model)
+        changes = EntityNetworkChanges.from_payload(data)
+        return self.planning_entities.reconcile(changes, source=source).model_dump()
+
+    def _apply_planning_entity_changes(
+        self, data: dict, *, source: str
+    ) -> dict[str, object]:
+        """Apply optional entity changes embedded in a volume or chapter plan."""
+        if self.planning_entities is None:
+            return {}
+        changes = EntityNetworkChanges.from_payload(data.get("entity_changes"))
+        return self.planning_entities.reconcile(changes, source=source).model_dump()
+
+    def _format_planning_entity_brief(
+        self,
+        entity_ids: list[str] | None = None,
+        *,
+        volume: int | None = None,
+    ) -> str:
+        if self.planning_entities is None:
+            return ""
+        return self.planning_entities.render_brief(entity_ids, volume_number=volume)
+
     def _format_entity_registry(self) -> str:
-        """Build the 'existing entities' block for the chapter-planning prompt."""
-        if self.codex is None:
-            return ""
-        entries = list(self.codex.iter_all())
-        if not entries:
-            return ""
-        lines = ["已有实体清单（entities 字段必须复用这里的 id，新实体才用 new: 前缀）："]
-        for e in entries:
-            alias_str = f"（别名：{'、'.join(e.aliases)}）" if e.aliases else ""
-            lines.append(f"  - {e.id}：{e.name}{alias_str}  [{e.type}]")
-        return "\n".join(lines)
+        """Build combined author-side and reader-side entity context."""
+        blocks: list[str] = []
+        planning_brief = self._format_planning_entity_brief()
+        if planning_brief:
+            blocks.append(planning_brief)
+        if self.codex is not None:
+            entries = list(self.codex.iter_all())
+            if entries:
+                lines = ["读者向 Codex 实体清单（用于已公开事实与别名对齐）："]
+                for e in entries:
+                    alias_str = f"（别名：{'、'.join(e.aliases)}）" if e.aliases else ""
+                    lines.append(f"  - {e.id}：{e.name}{alias_str}  [{e.type}]")
+                blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
 
 
 # ----------------------------------------------------------------------
@@ -1011,10 +1150,17 @@ def _parse_microscenes(raw: list) -> list[MicroScene]:
             words = max(int(s.get("words") or 0), 0)
         except (TypeError, ValueError):
             words = 0
+        action = str(s.get("action", "")).strip()
+        event = str(s.get("event", "")).strip()
+        intent = str(s.get("intent", "")).strip()
+        if not intent:
+            intent = event or action
         scenes.append(MicroScene(
-            action=str(s.get("action", "")).strip(),
+            intent=intent,
+            sensory=str(s.get("sensory", "")).strip(),
+            action=action,
             dialogue=str(s.get("dialogue", "")).strip(),
-            event=str(s.get("event", "")).strip(),
+            event=event,
             technique=str(s.get("technique", "")).strip(),
             pacing=str(s.get("pacing", "")).strip(),
             words=words,

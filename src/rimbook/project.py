@@ -23,6 +23,7 @@ _SUBDIRS = (
     "outline",
     "outline/chapters",
     "outline/volumes",
+    "planning",
     "drafts",
     "final",
     "state",
@@ -85,6 +86,17 @@ class ProjectPaths:
     def threads_file(self) -> Path:
         """Plot-thread ledger (foreshadowing / suspense / promises)."""
         return self.state_dir / "threads.yaml"
+
+    # --- author-side planning --------------------------------------------
+    @property
+    def planning_dir(self) -> Path:
+        """Private author-planning data, kept separate from reader-facing Codex."""
+        return self.root / "planning"
+
+    @property
+    def planning_entities_file(self) -> Path:
+        """The author-side entity and relationship network."""
+        return self.planning_dir / "entities.yaml"
 
     @property
     def reviews_dir(self) -> Path:

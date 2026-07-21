@@ -15,7 +15,19 @@ from pydantic import BaseModel
 import os
 from pathlib import Path
 
-from .routes import codex, llm_logs, narrative, outline, projects, prompts, server, status, versioning, writer
+from .routes import (
+    codex,
+    llm_logs,
+    narrative,
+    outline,
+    planning_entities,
+    projects,
+    prompts,
+    server,
+    status,
+    versioning,
+    writer,
+)
 
 app = FastAPI(
     title="RimBook",
@@ -41,6 +53,7 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(status.router)
 app.include_router(codex.router)
+app.include_router(planning_entities.router)
 app.include_router(outline.router)
 app.include_router(writer.router)
 app.include_router(narrative.router)

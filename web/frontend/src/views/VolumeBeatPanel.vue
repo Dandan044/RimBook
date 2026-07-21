@@ -387,7 +387,7 @@ defineExpose({ handlePipelineStep, setRunning, loadBeats })
 .step-item.active .step-dot {
   border-color: var(--rb-primary, #6366f1);
   color: var(--rb-primary, #6366f1);
-  background: rgba(99, 102, 241, 0.08);
+  background: var(--rb-primary-bg);
 }
 
 .step-item.done .step-dot {
@@ -433,7 +433,7 @@ defineExpose({ handlePipelineStep, setRunning, loadBeats })
 .running-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(255, 255, 255, 0.85);
+  background: color-mix(in srgb, var(--rb-bg-base) 88%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -441,7 +441,7 @@ defineExpose({ handlePipelineStep, setRunning, loadBeats })
   border-radius: 12px;
   z-index: 10;
   font-size: 14px;
-  color: var(--rb-text-secondary, #6b7280);
+  color: var(--rb-text-primary);
 }
 
 /* Beat Chain */

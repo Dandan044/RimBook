@@ -559,13 +559,16 @@ class ContextAssembler:
                     if s.technique:
                         meta_bits.append(s.technique)
                     meta = "·".join(meta_bits) if meta_bits else ""
+                    intent = (s.intent or s.event or s.action or "").strip()
                     head = f"    {j}{'（' + meta + '）' if meta else ''}："
-                    lines.append(head)
+                    lines.append(f"{head}{intent}" if intent else head)
+                    if s.sensory:
+                        lines.append(f"      感官/氛围：{s.sensory}")
                     if s.action:
                         lines.append(f"      动作：{s.action}")
                     if s.dialogue:
                         lines.append(f"      对白方向：{s.dialogue}")
-                    if s.event:
+                    if s.event and s.event.strip() != intent:
                         lines.append(f"      事件：{s.event}")
                 if b.entities:
                     lines.append(f"    涉及：{'、'.join(b.entities)}")

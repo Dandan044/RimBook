@@ -20,6 +20,8 @@ router = APIRouter(prefix="/api/projects/{project_id}/outline", tags=["outline"]
 # ---- models ----
 
 class MicroSceneIn(BaseModel):
+    intent: str = ""
+    sensory: str = ""
     action: str = ""
     dialogue: str = ""
     event: str = ""
@@ -29,6 +31,8 @@ class MicroSceneIn(BaseModel):
 
 
 class MicroSceneOut(BaseModel):
+    intent: str = ""
+    sensory: str = ""
     action: str = ""
     dialogue: str = ""
     event: str = ""
@@ -708,6 +712,7 @@ def update_chapter(number: int, req: ChapterOutlineIn, deps: ProjectDeps = Depen
             goal=b.goal, conflict=b.conflict, outcome=b.outcome, entities=b.entities,
             scenes=[
                 MicroScene(
+                    intent=s.intent, sensory=s.sensory,
                     action=s.action, dialogue=s.dialogue, event=s.event,
                     technique=s.technique, pacing=s.pacing, words=max(s.words, 0),
                 )
@@ -759,6 +764,7 @@ def _ch_out(c: ChapterOutline, paths=None) -> ChapterOutlineOut:
                 goal=b.goal, conflict=b.conflict, outcome=b.outcome, entities=b.entities,
                 scenes=[
                     MicroSceneOut(
+                        intent=s.intent, sensory=s.sensory,
                         action=s.action, dialogue=s.dialogue, event=s.event,
                         technique=s.technique, pacing=s.pacing, words=s.words,
                     )

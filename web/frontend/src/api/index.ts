@@ -50,6 +50,8 @@ export interface CodexEntry {
 }
 
 export interface MicroScene {
+  intent: string
+  sensory: string
   action: string
   dialogue: string
   event: string
@@ -148,6 +150,105 @@ export const updateCodex = (projectId: string, entryId: string, data: Partial<Co
 
 export const deleteCodex = (projectId: string, entryId: string) =>
   http.delete(`/projects/${projectId}/codex/${entryId}`).then(r => r.data)
+
+// ---------- Author-side planning entities ----------
+export interface EntityArc {
+  start: string
+  current: string
+  destination: string
+}
+
+export interface PlanningEntity {
+  id: string
+  name: string
+  kind: string
+  aliases: string[]
+  tags: string[]
+  story_role: string
+  surface_goal: string
+  inner_need: string
+  fear: string
+  values: string
+  flaw: string
+  secret: string
+  capabilities: string
+  limitations: string
+  voice: string
+  action_style: string
+  arc: EntityArc
+  volume_roles: Record<string, string>
+  codex_ref: string
+  field_locks: string[]
+  source: string
+  updated_at: string
+}
+
+export interface RelationshipArc {
+  start: string
+  current: string
+  destination: string
+}
+
+export interface EntityRelationship {
+  id: string
+  source_entity_id: string
+  target_entity_id: string
+  relationship_type: string
+  tags: string[]
+  status: string
+  source_goal: string
+  target_goal: string
+  stakes: string
+  conflict: string
+  secret: string
+  arc: RelationshipArc
+  field_locks: string[]
+  source: string
+  updated_at: string
+}
+
+export interface EntityNetwork {
+  version: number
+  entities: PlanningEntity[]
+  relationships: EntityRelationship[]
+  updated_at: string
+}
+
+export const getPlanningEntityNetwork = (projectId: string) =>
+  http.get<EntityNetwork>(`/projects/${projectId}/planning-entities`).then(r => r.data)
+
+export const addPlanningEntity = (projectId: string, entity: PlanningEntity) =>
+  http.post<PlanningEntity>(`/projects/${projectId}/planning-entities/entities`, entity).then(r => r.data)
+
+export const updatePlanningEntity = (projectId: string, entity: PlanningEntity) =>
+  http.put<PlanningEntity>(`/projects/${projectId}/planning-entities/entities/${entity.id}`, entity).then(r => r.data)
+
+export const deletePlanningEntity = (projectId: string, entityId: string) =>
+  http.delete<{ ok: boolean }>(`/projects/${projectId}/planning-entities/entities/${entityId}`).then(r => r.data)
+
+export const addEntityRelationship = (projectId: string, relationship: EntityRelationship) =>
+  http.post<EntityRelationship>(`/projects/${projectId}/planning-entities/relationships`, relationship).then(r => r.data)
+
+export const updateEntityRelationship = (projectId: string, relationship: EntityRelationship) =>
+  http.put<EntityRelationship>(`/projects/${projectId}/planning-entities/relationships/${relationship.id}`, relationship).then(r => r.data)
+
+export const deleteEntityRelationship = (projectId: string, relationshipId: string) =>
+  http.delete<{ ok: boolean }>(`/projects/${projectId}/planning-entities/relationships/${relationshipId}`).then(r => r.data)
+
+export const setPlanningEntityFieldLock = (
+  projectId: string,
+  itemId: string,
+  itemType: 'entity' | 'relationship',
+  fieldName: string,
+  locked: boolean,
+) => http.put<{ ok: boolean }>(`/projects/${projectId}/planning-entities/locks/${itemId}`, {
+  item_type: itemType,
+  field_name: fieldName,
+  locked,
+}).then(r => r.data)
+
+export const syncPlanningEntityNetwork = (projectId: string, volume?: number) =>
+  http.post<Record<string, unknown>>(`/projects/${projectId}/planning-entities/sync`, { volume: volume ?? null }).then(r => r.data)
 
 // ---------- Outline ----------
 

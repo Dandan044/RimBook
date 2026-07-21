@@ -211,9 +211,9 @@
 
                 <div class="keynote-section">
                   <h3 class="beats-heading">章基调</h3>
-                  <p class="keynote-hint">隐性约束：必须渗透进剧情，禁止在正文中明说或总结。</p>
+                  <p class="keynote-hint">2–5 条本章特有约束，勿套公式前缀；必须渗透进剧情，禁止在正文中明说或总结。</p>
                   <div v-for="(_k, ki) in chapterForm.keynote" :key="'kn'+ki" class="keynote-row">
-                    <el-input v-model="chapterForm.keynote[ki]" size="small" placeholder="如：林默只知道晶化传言，不知道病毒真相" />
+                    <el-input v-model="chapterForm.keynote[ki]" size="small" placeholder="如：近距离跟林默，吊坠只当遗物，章末停在门缝的光" />
                     <el-button type="danger" size="small" text @click="chapterForm.keynote.splice(ki, 1)">
                       <el-icon><Delete /></el-icon>
                     </el-button>
@@ -249,10 +249,12 @@
                               <el-icon><Delete /></el-icon>
                             </el-button>
                           </div>
-                          <el-form label-width="70px" size="small">
-                            <el-form-item label="动作"><el-input v-model="sc.action" type="textarea" :rows="2" /></el-form-item>
-                            <el-form-item label="对白方向"><el-input v-model="sc.dialogue" /></el-form-item>
-                            <el-form-item label="事件"><el-input v-model="sc.event" /></el-form-item>
+                          <el-form label-width="80px" size="small">
+                            <el-form-item label="创作意图"><el-input v-model="sc.intent" type="textarea" :rows="2" placeholder="本段要让读者感到什么（环境/沉默/物件/人物均可）" /></el-form-item>
+                            <el-form-item label="感官/氛围"><el-input v-model="sc.sensory" type="textarea" :rows="2" placeholder="可空；环境与感官方向" /></el-form-item>
+                            <el-form-item label="动作"><el-input v-model="sc.action" type="textarea" :rows="2" placeholder="可空；无人场景请留空" /></el-form-item>
+                            <el-form-item label="对白方向"><el-input v-model="sc.dialogue" placeholder="可空；无对白请留空" /></el-form-item>
+                            <el-form-item label="事件"><el-input v-model="sc.event" placeholder="可空；有剧情转折才填" /></el-form-item>
                             <el-form-item label="手法"><el-input v-model="sc.technique" /></el-form-item>
                             <el-form-item label="节奏"><el-input v-model="sc.pacing" placeholder="缓起/加速/留白/爆发…" /></el-form-item>
                             <el-form-item label="篇幅">
@@ -297,6 +299,9 @@
         </div>
       </el-tab-pane>
 
+      <el-tab-pane label="幕后实体" name="entities" lazy>
+        <PlanningEntities />
+      </el-tab-pane>
       <el-tab-pane label="线索账本" name="threads" lazy>
         <NarrativePanel section="threads" />
       </el-tab-pane>
@@ -345,6 +350,7 @@ import {
 } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import NarrativePanel from './Narrative.vue'
+import PlanningEntities from './PlanningEntities.vue'
 import VolumeBeatPanel from './VolumeBeatPanel.vue'
 
 const store = useProjectStore()
@@ -354,6 +360,7 @@ const localBusy = ref(false)
 const generating = computed(() => localBusy.value || store.volumePlan.active)
 const volumePlan = computed(() => store.volumePlan)
 const planSteps = [
+  { num: 0, label: '同步实体' },
   { num: 1, label: '卷规划' },
   { num: 2, label: 'Beat 链' },
   { num: 3, label: '细化组装' },
@@ -361,7 +368,7 @@ const planSteps = [
 const deleting = ref(false)
 const mainTab = ref('outline')
 
-const VALID_TABS = new Set(['outline', 'threads', 'style', 'recap', 'review'])
+const VALID_TABS = new Set(['outline', 'entities', 'threads', 'style', 'recap', 'review'])
 
 function syncTabFromRoute() {
   const q = String(route.query.tab || 'outline')
@@ -498,7 +505,10 @@ const chapterForm = reactive({
 
 function addMicroScene(beat: SceneBeat) {
   if (!beat.scenes) beat.scenes = []
-  beat.scenes.push({ action: '', dialogue: '', event: '', technique: '', pacing: '', words: 300 })
+  beat.scenes.push({
+    intent: '', sensory: '', action: '', dialogue: '', event: '',
+    technique: '', pacing: '', words: 300,
+  })
 }
 
 function cloneBeat(b: SceneBeat): SceneBeat {
@@ -507,7 +517,16 @@ function cloneBeat(b: SceneBeat): SceneBeat {
     conflict: b.conflict,
     outcome: b.outcome,
     entities: [...(b.entities || [])],
-    scenes: (b.scenes || []).map((s: MicroScene) => ({ ...s })),
+    scenes: (b.scenes || []).map((s: MicroScene) => ({
+      intent: s.intent || s.event || s.action || '',
+      sensory: s.sensory || '',
+      action: s.action || '',
+      dialogue: s.dialogue || '',
+      event: s.event || '',
+      technique: s.technique || '',
+      pacing: s.pacing || '',
+      words: s.words || 0,
+    })),
   }
 }
 
@@ -860,14 +879,18 @@ onUnmounted(() => {
 .page-header {
   margin-bottom: 12px;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .plan-banner {
   margin-bottom: 14px;
   padding: 12px 16px;
-  border: 1px solid var(--rb-border-light, #e5e7eb);
+  border: 1px solid var(--rb-border-light);
   border-radius: 12px;
-  background: linear-gradient(180deg, rgba(99, 102, 241, 0.06), rgba(255, 255, 255, 0.9));
+  background: linear-gradient(180deg, var(--rb-primary-bg), var(--rb-bg-surface));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -885,12 +908,12 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: var(--rb-text-muted, #9ca3af);
+  color: var(--rb-text-muted);
   font-weight: 500;
 }
 
 .plan-banner-step.active {
-  color: var(--rb-primary, #6366f1);
+  color: var(--rb-primary);
   font-weight: 600;
 }
 
@@ -908,6 +931,13 @@ onUnmounted(() => {
   justify-content: center;
   font-size: 11px;
   font-weight: 700;
+  background: var(--rb-bg-surface);
+  color: inherit;
+}
+
+.plan-banner-step.active .plan-banner-dot {
+  background: var(--rb-primary-bg);
+  color: var(--rb-primary);
 }
 
 .plan-banner-msg {
@@ -915,13 +945,13 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: var(--rb-text-secondary, #6b7280);
+  color: var(--rb-text-primary);
 }
 
 .plan-banner-vol {
   margin-left: auto;
   font-size: 12px;
-  color: var(--rb-primary, #6366f1);
+  color: var(--rb-primary);
   font-weight: 600;
 }
 

@@ -36,6 +36,7 @@ from .memory import (
 )
 from .outline import OutlineStore
 from .pipeline import Checker, Planner, Writer
+from .planning_entities import EntityNetworkService, PlanningEntityStore
 from .project import ProjectPaths, locate_project, scaffold_project
 
 app = typer.Typer(
@@ -157,7 +158,10 @@ class Deps:
     def planner(self) -> Planner:
         return Planner(
             self.llm, self.prompts, self.outline,
-            codex=self.codex, threads=self.threads, trace=self.trace,
+            codex=self.codex,
+            planning_entities=EntityNetworkService(PlanningEntityStore(self.paths)),
+            threads=self.threads,
+            trace=self.trace,
             project_name=self.project_dir.name,
         )
 

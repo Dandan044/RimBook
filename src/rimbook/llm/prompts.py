@@ -42,6 +42,23 @@ class Prompts:
         "主线剧情/实体轮廓/世界观规则体系/预期结局）逐项产出：\n\n{premise}\n"
     )
 
+    entity_sync_system: str = (
+        "你是一位小说幕后策划。根据已发生剧情与作者侧实体网络，维护一套只供规划使用的"
+        "实体与关系网。它允许记录尚未揭示的动机、秘密和未来弧线，绝不能把读者已知事实"
+        "误当成全部真相。只提出有明确剧情依据或规划必要性的变更，避免为同一实体重复建档。\n"
+        "【输出格式】仅输出 JSON："
+        '{"entities":[{"id":"稳定 id","name":"名称","story_role":"...","surface_goal":"...",'
+        '"inner_need":"...","fear":"...","flaw":"...","arc":{"current":"..."}}],'
+        '"relationships":[{"id":"稳定关系 id","source_entity_id":"...","target_entity_id":"...",'
+        '"relationship_type":"...","status":"...","conflict":"...","arc":{"current":"..."}}]}。'
+        "字段可省略表示不更新；不要输出任何额外文字。"
+    )
+    entity_sync_user: str = (
+        "已有幕后实体网络：\n{entity_network}\n\n"
+        "已发生剧情上下文：\n{story_context}\n\n"
+        "请生成需要补充或更新的实体与关系变更 JSON。"
+    )
+
     volume_system: str = (
         "你是一位资深小说策划。根据全书梗概与既有卷目录要，规划下一卷的"
         "结构化卷大纲。要求覆盖：本卷主线推进、核心冲突、出场主要实体、"
@@ -50,7 +67,7 @@ class Prompts:
         "【输出格式】仅输出一个 JSON 对象，字段为：\n"
         '  {"title": "卷标题", "arc": "本卷弧线叙述（约 400-600 字）",'
         ' "ending": "本卷收束与衔接下卷的钩子（必填，非空）",'
-        ' "chapter_count": 6}\n'
+        ' "chapter_count": 6, "entity_changes": {"entities": [], "relationships": []}}\n'
         "chapter_count 建议 4-12（整数）。不要输出任何额外文字或代码块标记。"
     )
 
@@ -66,7 +83,7 @@ class Prompts:
         "不得为同一实体另起新名或重复塑造；"
         "若提供了「未回收的情节线索」，请在本卷规划中明确推进或回收哪些线索，"
         "勿令其长期悬置或被遗忘；"
-        "按系统提示仅输出 JSON（含 title、arc、ending、chapter_count）。"
+        "按系统提示仅输出 JSON（含 title、arc、ending、chapter_count、entity_changes）。"
     )
 
     volume_chapters_system: str = (
@@ -136,7 +153,10 @@ class Prompts:
         '    {{"id": "b01", "goal": "...", "conflict": "...", "outcome": "...",'
         ' "entities": ["id", ...], "momentum": "..."}},\n'
         '    ...\n'
-        "  ]}}\n"
+        "  ],\n"
+        '  "entity_changes": {{"entities": [], "relationships": []}}\n'
+        "}}\n"
+        "entity_changes 仅记录本卷 beat 明确要求新建或推进的实体/关系；字段结构遵循前述幕后实体网络语义。\n"
         "id 从 b01 开始递增。不要输出任何额外文字或代码块标记。"
     )
 
@@ -149,22 +169,28 @@ class Prompts:
         "请为本卷生成 {min_beats}~{max_beats} 个连续叙事 beat。\n"
         "不要考虑章节划分，只关注叙事的连续流动与动量传递。\n"
         "严格遵循实体 id 复用规则，仅输出 "
-        '{{"beats": [...]}} JSON。'
+        '{{"beats": [...], "entity_changes": {{...}}}} JSON。'
     )
 
     beat_refine_system: str = (
         "你是一位资深小说策划。当前章已确定「章基调」(keynote) 与所属 beat 列表。"
         "请把每个 beat 拆成 2-5 个「细场景」(MicroScene)，使写作可直接执行。\n"
-        "每个细场景包含：\n"
-        "- action：谁做什么动作（具体、可拍）；\n"
-        "- dialogue：关键对白方向（可空；写意图与语气，不要写成完整剧本）；\n"
-        "- event：本小段剧情转折；\n"
-        "- technique：写作手法（环境隐喻、对话潜台词、留白、蒙太奇等）；\n"
+        "每个细场景字段：\n"
+        "- intent（必填）：本段创作意图——要让读者感到什么、推进什么体验"
+        "（环境压迫、物件细节、沉默张力、信息误导、人物试探等，不限人物戏）；\n"
+        "- sensory（可空）：环境/感官/氛围方向；\n"
+        "- action（可空）：有人物行为时才填「谁做什么」；无人场景必须留空；\n"
+        "- dialogue（可空）：有对白需要时才填方向与语气，不要写成完整剧本；\n"
+        "- event（可空）：确有剧情转折才填；\n"
+        "- technique：写作手法（环境隐喻、留白、蒙太奇、触感描写等）；\n"
         "- pacing：节奏（缓起/加速/留白/爆发/收束/过渡）；\n"
         "- words：预计字数（整数，通常 150-500）。\n"
         "【硬规则】\n"
-        "- 细场景必须服从章基调：认知边界、禁止项、结尾落点、视角约束一律遵守；\n"
-        "- 不要把基调内容写成可直接贴进正文的总结句；\n"
+        "- intent 必填；禁止为了填 action/dialogue 而虚构人物或对白；\n"
+        "- 无人场景以 intent + sensory 主导，action 与 dialogue 必须为空串；\n"
+        "- 同一 beat 内细场景应在主导模态上有变化"
+        "（环境/人物/对白/物件/信息），避免条条都是「谁+说什么」；\n"
+        "- 细场景必须服从章基调；不要把基调写成可直接贴进正文的总结句；\n"
         "- 保持 beat 的 id/goal/conflict/outcome/entities/momentum 不变；\n"
         "- 只输出该章 beats，顺序与输入一致。\n"
         "【输出格式】仅输出一个 JSON 对象：\n"
@@ -172,8 +198,12 @@ class Prompts:
         '    {"id": "b01", "goal": "...", "conflict": "...", "outcome": "...",'
         ' "entities": [...], "momentum": "...",\n'
         '     "scenes": [\n'
-        '       {"action": "...", "dialogue": "...", "event": "...",'
-        ' "technique": "...", "pacing": "缓起", "words": 300}\n'
+        '       {"intent": "走廊湿冷压迫感压垮侥幸", "sensory": "霉味、滴水回声",'
+        ' "action": "", "dialogue": "", "event": "",'
+        ' "technique": "环境隐喻", "pacing": "缓起", "words": 280},\n'
+        '       {"intent": "试探对方是否知情", "sensory": "",'
+        ' "action": "把吊坠握在掌心", "dialogue": "压低声音旁敲侧击",'
+        ' "event": "对方眼神闪躲", "technique": "潜台词", "pacing": "加速", "words": 320}\n'
         "     ]}\n  ]}\n"
         "不要输出额外文字。"
     )
@@ -183,6 +213,7 @@ class Prompts:
         "本章标题：{chapter_title}\n"
         "本章叙事功能：{chapter_purpose}\n"
         "章末钩子：{chapter_hook}\n\n"
+        "{entity_brief_block}"
         "【章基调 — 必须服从，禁止在细场景里写成明说总结】\n"
         "{keynote_block}\n\n"
         "以下是本章 beat 列表，请为每个 beat 拆出细场景：\n\n"
@@ -200,20 +231,19 @@ class Prompts:
         "id 格式为 \"bXX_bridge\"；\n"
         "- 衔接 beat 需要 goal/conflict/outcome/entities/momentum。\n"
         "【章基调 keynote — 极重要】\n"
-        "keynote 是整章隐性约束清单（4-8 条），必须渗透进剧情但禁止在正文中明说/总结。包括：\n"
-        "- 视角与叙述距离；\n"
-        "- 角色此刻知道/不知道/误信什么；\n"
-        "- 人物表面目标 vs 真实动机；\n"
-        "- 必须隐瞒但要让读者感受到的真相；\n"
-        "- 写作禁止项（禁止总结、禁止医学解释等）；\n"
-        "- 结尾落点约束。\n"
+        "keynote 是本章特有的隐性约束（2-5 条，够用即止），必须渗透进剧情但禁止在正文中明说/总结。\n"
+        "- 只写本章真正会改变正文写法的约束；某维度无关则省略，不要为凑条数硬写；\n"
+        "- 禁止固定前缀模板（不要每章都套「视角：」「认知：」「禁止：」「结尾：」）；\n"
+        "- 用自然语言短句，各条应互不相同（情境事实、认知边界、触感、结尾落点等可混用）。\n"
         "【章级元数据】title / purpose / value_shift / tension(1-5) / hook / story_date / elapsed。\n"
         "【输出格式】仅输出一个 JSON 对象：\n"
         '  {{"chapters": [\n'
         '    {{"title": "...", "beat_ids": ["b01", "b02"],\n'
         '     "purpose": "...", "value_shift": "...", "tension": 3,\n'
         '     "hook": "...", "story_date": "...", "elapsed": "...",\n'
-        '     "keynote": ["视角：…", "林默只知道…", "禁止…", "结尾应落在…"],\n'
+        '     "keynote": ["近距离跟林默，外界只剩雨声与金属回响",'
+        ' "林默以为吊坠只是遗物，读者应感到它在回应什么",'
+        ' "章末停在门缝渗出的光，不要升华"],\n'
         '     "bridge_beats": [\n'
         '       {{"id": "b02_bridge", "goal": "...", "conflict": "...",'
         ' "outcome": "...", "entities": [], "momentum": "...", "is_bridge": true}}\n'
@@ -225,6 +255,7 @@ class Prompts:
         "本卷标题：{volume_title}\n"
         "本卷弧线：\n{volume_arc}\n\n"
         "本卷收束（ending）：\n{volume_ending}\n\n"
+        "{entity_brief_block}"
         "以下是本卷 beat 链（共 {beat_count} 个），请分组为恰好 {chapter_count} 章，"
         "并为每章写出 keynote：\n\n"
         "{beats_json}\n\n"
@@ -266,6 +297,7 @@ class Prompts:
         ' "notes": "...",\n'
         '   "purpose": "...", "value_shift": "...", "tension": 3, "hook": "...",\n'
         '   "story_date": "...", "elapsed": "...",\n'
+        '   "entity_changes": {"entities": [], "relationships": []},\n'
         '   "beats": [{"goal": "...", "conflict": "...", "outcome": "...",'
         ' "entities": ["id", ...]}, ...]}\n'
         "不要输出任何额外文字或代码块标记。"
@@ -279,7 +311,8 @@ class Prompts:
         "{entity_registry_block}"
         "{hint_block}"
         "请为第 {number} 章生成章节 beat。{title_block}\n"
-        "请严格遵循系统提示中的 beat 衔接与一致性要求、实体 id 复用规则，仅输出 JSON。"
+        "请严格遵循系统提示中的 beat 衔接与一致性要求、实体 id 复用规则，"
+        "并在 entity_changes 中记录本章需要新建或推进的幕后实体/关系，仅输出 JSON。"
     )
 
     # ------------------------------------------------------------------
@@ -290,8 +323,9 @@ class Prompts:
         "你的写作原则：\n"
         "1. 【章基调优先】若上下文提供「章基调」(keynote)，它是本章最高写作约束："
         "必须渗透进氛围、视角、认知边界与结尾落点，但禁止在正文中直接说出、复述或总结这些条目；\n"
-        "2. 【按细场景演】若提供「细场景」(MicroScene)，按顺序用动作、对话、感官把每个瞬间演出来；"
-        "细场景是写作清单，不是要扩写的大纲句子——禁止逐条复述 goal/outcome/event 标签；\n"
+        "2. 【按细场景演】若提供「细场景」(MicroScene)，按每条的「创作意图」演出；"
+        "感官/动作/对白/事件字段为空表示该模态不存在——勿补写人物戏或对白；"
+        "有则按需用感官、动作或对话展现；禁止逐条复述 goal/outcome/event 标签；\n"
         "3. 若尚无细场景，再按传统「章节 beat」(goal/conflict/outcome) 推进，仍须服从章基调；\n"
         "4. 实体言行必须与其「档案」一致，绝不 OOC（角色失格）；\n"
         "5. 严格遵守「世界观设定」，不得引入相互矛盾或未授权的设定；\n"
@@ -312,7 +346,7 @@ class Prompts:
         "请根据以下结构化上下文，撰写第 {number} 章的完整正文。\n\n"
         "{context}\n\n"
         "现在请直接开始写正文。\n"
-        "优先服从「章基调」与「细场景」：基调只渗透不明说；细场景只演不抄；"
+        "优先服从「章基调」与「细场景」：基调只渗透不明说；细场景按意图演出、空字段勿补戏；"
         "并遵守风格指南、数值一致、因果自洽与场景转换交代。"
     )
 

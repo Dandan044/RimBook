@@ -325,12 +325,21 @@ def _clean_beat(b: Any) -> dict[str, Any]:
         for s in scenes_raw:
             if not isinstance(s, dict):
                 continue
-            scene_allowed = {"action", "dialogue", "event", "technique", "pacing", "words"}
+            scene_allowed = {
+                "intent", "sensory", "action", "dialogue",
+                "event", "technique", "pacing", "words",
+            }
             cleaned = {k: v for k, v in s.items() if k in scene_allowed}
             try:
                 cleaned["words"] = max(int(cleaned.get("words") or 0), 0)
             except (TypeError, ValueError):
                 cleaned["words"] = 0
+            # Legacy chapters without intent: backfill from event or action.
+            if not str(cleaned.get("intent") or "").strip():
+                fallback = str(cleaned.get("event") or cleaned.get("action") or "").strip()
+                if fallback:
+                    cleaned["intent"] = fallback
+            cleaned.setdefault("sensory", "")
             cleaned_scenes.append(cleaned)
         out["scenes"] = cleaned_scenes
     return out

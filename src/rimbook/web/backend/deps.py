@@ -27,6 +27,7 @@ from rimbook.memory import (
     ThreadStore,
 )
 from rimbook.outline import OutlineStore
+from rimbook.planning_entities import EntityNetworkService, PlanningEntityStore
 from rimbook.pipeline import Checker, Planner, Writer, PostWritePipeline
 from rimbook.project import ProjectPaths, scaffold_project
 from rimbook.versioning import VersionManager
@@ -76,6 +77,10 @@ class ProjectDeps:
     @property
     def entity_state(self) -> EntityStateStore:
         return EntityStateStore(self.paths)
+
+    @property
+    def planning_entities(self) -> EntityNetworkService:
+        return EntityNetworkService(PlanningEntityStore(self.paths))
 
     @property
     def window(self) -> SlidingWindow:
@@ -153,7 +158,10 @@ class ProjectDeps:
         # up with parallel codex entries (char_lin_yuan vs char_linyuan, etc.).
         return Planner(
             self.llm, self.prompts, self.outline,
-            codex=self.codex, threads=self.threads, trace=self.trace,
+            codex=self.codex,
+            planning_entities=self.planning_entities,
+            threads=self.threads,
+            trace=self.trace,
             project_name=self.project_dir.name,
         )
 

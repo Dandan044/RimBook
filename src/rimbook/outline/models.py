@@ -13,11 +13,24 @@ __all__ = [
 
 
 class MicroScene(BaseModel):
-    """A fine-grained beat unit — one performable moment inside a SceneBeat."""
+    """A fine-grained beat unit — one performable moment inside a SceneBeat.
 
-    action: str = Field(default="", description="Who does what.")
+    ``intent`` is the primary creative brief. Modality fields (sensory / action /
+    dialogue / event) are filled only when relevant — empty means that modality
+    does not apply (e.g. an environment-only beat leaves action/dialogue blank).
+    """
+
+    intent: str = Field(
+        default="",
+        description="Creative intent of this moment (atmosphere, reveal, silence, object, etc.).",
+    )
+    sensory: str = Field(
+        default="",
+        description="Environment / sensory / atmosphere direction (optional).",
+    )
+    action: str = Field(default="", description="Character action when people are involved (optional).")
     dialogue: str = Field(default="", description="Dialogue direction (optional).")
-    event: str = Field(default="", description="Plot turn in this micro-moment.")
+    event: str = Field(default="", description="Plot turn in this micro-moment (optional).")
     technique: str = Field(default="", description="Craft technique, e.g. 环境隐喻.")
     pacing: str = Field(default="", description="Pacing: 缓起/加速/留白/爆发/收束/过渡.")
     words: int = Field(default=0, ge=0, description="Target word count for this beatlet.")
