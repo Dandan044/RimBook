@@ -6,7 +6,21 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-__all__ = ["SceneBeat", "ChapterOutline", "VolumeOutline", "ChapterSummary"]
+__all__ = [
+    "MicroScene", "SceneBeat", "RawBeat", "RefinedBeat", "ChapterAssignment",
+    "VolumeBeatData", "ChapterOutline", "VolumeOutline", "ChapterSummary",
+]
+
+
+class MicroScene(BaseModel):
+    """A fine-grained beat unit — one performable moment inside a SceneBeat."""
+
+    action: str = Field(default="", description="Who does what.")
+    dialogue: str = Field(default="", description="Dialogue direction (optional).")
+    event: str = Field(default="", description="Plot turn in this micro-moment.")
+    technique: str = Field(default="", description="Craft technique, e.g. 环境隐喻.")
+    pacing: str = Field(default="", description="Pacing: 缓起/加速/留白/爆发/收束/过渡.")
+    words: int = Field(default=0, ge=0, description="Target word count for this beatlet.")
 
 
 class SceneBeat(BaseModel):
@@ -17,6 +31,62 @@ class SceneBeat(BaseModel):
     outcome: str = Field(default="", description="Where the scene should land.")
     # ids of codex entities this scene explicitly involves (drives context loading)
     entities: list[str] = Field(default_factory=list)
+    scenes: list[MicroScene] = Field(
+        default_factory=list,
+        description="Fine-grained micro-scenes produced by Step 3b.",
+    )
+
+
+class RawBeat(BaseModel):
+    """A volume-level narrative beat — the atomic unit before chapter grouping."""
+
+    id: str = Field(..., description="Stable identifier, e.g. 'b01', 'b02'.")
+    goal: str = Field(..., description="What this narrative moment accomplishes.")
+    conflict: str = Field(default="", description="The central tension.")
+    outcome: str = Field(default="", description="Where this beat lands.")
+    entities: list[str] = Field(default_factory=list)
+    momentum: str = Field(default="", description="Narrative momentum: what emotional/directional shift this beat creates.")
+
+
+class RefinedBeat(RawBeat):
+    """Legacy Step-3a craft fields (kept for beats.yaml backward compat).
+
+    New pipeline writes MicroScene under ChapterOutline.beats instead.
+    """
+
+    technique: str = Field(default="", description="Specific narrative technique.")
+    plot_detail: str = Field(default="", description="Expanded plot detail.")
+    thematic_expr: str = Field(default="", description="Theme/emotion expressed.")
+    pacing_note: str = Field(default="", description="Pacing annotation.")
+    is_bridge: bool = Field(default=False, description="Created as a transition beat.")
+
+
+class ChapterAssignment(BaseModel):
+    """The grouping result from Step 3a — which beats form which chapter."""
+
+    chapter: int = Field(..., description="Assigned chapter number.")
+    title: str = ""
+    beat_ids: list[str] = Field(default_factory=list, description="Ordered beat ids in this chapter.")
+    purpose: str = ""
+    value_shift: str = ""
+    tension: int = Field(default=0, ge=0, le=5)
+    hook: str = ""
+    story_date: str = ""
+    elapsed: str = ""
+    keynote: list[str] = Field(
+        default_factory=list,
+        description="Chapter undertone: implicit constraints that must permeate prose.",
+    )
+
+
+class VolumeBeatData(BaseModel):
+    """The full beat pipeline state for one volume, stored as volNN.beats.yaml."""
+
+    volume: int
+    step: int = Field(default=2, description="Pipeline progress: 2=raw beats done, 3=grouped+microscened.")
+    raw_beats: list[RawBeat] = Field(default_factory=list)
+    refined_beats: list[RefinedBeat] = Field(default_factory=list)
+    chapter_map: list[ChapterAssignment] = Field(default_factory=list)
 
 
 class ChapterOutline(BaseModel):
@@ -31,6 +101,8 @@ class ChapterOutline(BaseModel):
     tags: list[str] = Field(default_factory=list)
     # Authorial notes: foreshadowing to plant/resolve, constraints, bans
     notes: str = ""
+    # Implicit chapter undertone — must permeate, must not be stated outright.
+    keynote: list[str] = Field(default_factory=list)
     # The realized summary, filled in after the chapter is written
     summary: str = ""
     # --- pacing / structure (planner-provided, optional) ---

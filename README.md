@@ -11,7 +11,7 @@
 | 内容遗忘 | 章节摘要树 + 滑动窗口 + 分层记忆（全书至今 / 卷回顾）+ 定向检索 |
 | 设定混淆 | 结构化设定集（Codex）显式加载 + 一致性校验 |
 | 人物 OOC | 人物档案（含语言风格画像）+ 实体当前状态跟踪 + 风格指南注入 |
-| 剧情混乱 | 分层大纲（梗概→卷→章节 beat）+ 情节线索账本（伏笔/悬念/承诺） |
+| 剧情混乱 | 分层大纲（梗概→卷→连续 beat 链→章基调+细场景）+ 情节线索账本（伏笔/悬念/承诺） |
 | 设定演进 | PostWritePipeline：每章写完后 LLM 自动发现新实体、标记矛盾、抽取线索 |
 | Token 超限 | BudgetAllocator：按优先级（beat > chapter > tag > 向量）分配上下文预算 |
 | 重写污染 | 预写快照 + 干净回退（`delete_missing`）+ 叙事资产章级清理 / 后续章存在时分支 fork |
@@ -42,8 +42,8 @@
 │                         Web UI (Vue 3)                                │
 │  仪表盘 │ 写作规划 │ 写作 │ 设定集 │ LLM 日志 │ 工作流 │ 设置         │
 │                                                                        │
-│  · 写作规划：卷批量规划（卷+全章 beat）/ 单章补规划 / 删除卷章      │
-│  · 写作工作台：结构化上下文 + 分支/回退重写 + SSE 流式生成           │
+│  · 写作规划：卷规划 v2（卷大纲 → 连续 beat 链 → 章基调+细场景）/ 单章补规划 / 删除卷章 │
+│  · 写作工作台：章基调+细场景注入上下文 + 分支/回退重写 + SSE 流式生成           │
 │  · 设定集：Tab 式（档案 / 章节发现 / 矛盾）                           │
 │  · LLM 日志：按日浏览 `.llm_logs`，查看 prompt / 响应 / token 用量   │
 │  · 工作流：流水线可视化（Mermaid）                                    │
@@ -124,10 +124,22 @@ rimbook status
 ## 工作流（分阶段可介入）
 
 ```
-init → codex add → outline synopsis → outline chapter → write → check
-                                              ↑                           ↓
-                                              └──── revise / 修改文件 ←────┘
+init → codex add → outline synopsis
+                 → outline volume（v2：卷大纲 → beat 链 → 章基调+细场景）
+                 → write → check
+                              ↑              ↓
+                              └── revise / 改文件 ←┘
 ```
+
+**卷规划 v2（Web「新卷」默认管线）**
+
+1. **Step 1** — 生成卷大纲（title / arc / ending / chapter_count）
+2. **Step 2** — 生成整卷连续叙事 beat 链（不按章切分；有数量上下限）
+3. **Step 3a** — 按节奏分组为章，并为每章写 **章基调**（`keynote`：隐性约束，渗透正文但不明说）
+4. **Step 3b** — 按章把每个 beat 拆成 **细场景**（`MicroScene`：动作/对白方向/事件/手法/节奏/篇幅）
+
+Writer 写正文时优先服从章基调与细场景：基调只渗透不明说，细场景只演不抄大纲标签。  
+全流程 SSE 一次跑完；可编辑 beat 后单独重跑 Step 3（「重新组装」）。中间状态保存在 `outline/volumes/volNN.beats.yaml`。
 
 每个阶段都把结果写到**人类可读的 Markdown/YAML 文件**，你可以随时用编辑器修改设定、大纲、摘要，再继续。这是"分阶段可介入"的基础。
 
@@ -138,7 +150,7 @@ init → codex add → outline synopsis → outline chapter → write → check
 | `init` | 初始化小说项目 |
 | `codex add / ls / show / dedup / merge / migrate` | 管理设定集（实体/世界观/地点/势力/物品/时间线） |
 | `outline synopsis` | 生成全书梗概 |
-| `outline volume` | 规划一卷（含结局），并同会话生成该卷全部章 beat；已存在卷不可重复规划 |
+| `outline volume` | 规划一卷（CLI 仍为卷+全章 beat 批量；Web「新卷」走 v2：beat 链 → 章基调+细场景） |
 | `outline chapter` | 规划单章 beat（必须 `--volume`；可往已有卷追加） |
 | `write <n>` | 生成章节正文（完整流水线：上下文组装→写作→校验→富化） |
 | `enrich <n>` | 单独运行 PostWrite 富化流水线（从已写章节发现实体、标记矛盾、抽取线索） |
@@ -206,8 +218,8 @@ my_novel/
 │   ├── synopsis.md
 │   ├── style.md             # 写作风格指南（voice card）
 │   ├── story_so_far.md      # 滚动「全书至今」故事线
-│   ├── volumes/             # 含卷回顾（recap）
-│   └── chapters/
+│   ├── volumes/             # 卷大纲（含 recap）+ volNN.beats.yaml（v2 beat 管线状态）
+│   └── chapters/            # 章大纲：keynote + beats[].scenes（细场景） |
 ├── drafts/                  # 正文草稿（及可选 chNNN.context.json）
 ├── final/                   # 定稿
 ├── state/                   # 运行态：实体状态、线索账本、审阅报告、向量索引
@@ -299,8 +311,8 @@ npm run dev
 | 页面 | 功能 |
 |------|------|
 | **仪表盘** | 项目选择/创建/删除、统计卡片、章节进度表、全书梗概 |
-| **写作规划** | 大纲树（梗概→卷→章节 beat）+ 线索账本 / 风格指南 / 故事线 / 宏观审阅 |
-| **写作工作台** | 三栏布局：结构化上下文 / 正文编辑器 / 校验与富化；支持当前分支显示、重写回退与后续章存在时的分支 fork |
+| **写作规划** | 大纲树 + 卷规划 v2（beat 链面板 / 三步 SSE 进度）+ 章基调与细场景编辑；线索账本 / 风格指南 / 故事线 / 宏观审阅 |
+| **写作工作台** | 三栏布局：结构化上下文（含章基调+细场景）/ 正文编辑器 / 校验与富化；支持当前分支显示、重写回退与后续章存在时的分支 fork |
 | **设定集** | Tab 式布局（档案 / 章节发现 / 矛盾），按类型管理实体，在线编辑档案，Markdown 渲染 |
 | **LLM 日志** | 按日浏览项目 `.llm_logs/`：按任务分组、查看完整 prompt/响应、token 用量统计 |
 | **工作流** | 创作流水线可视化（Mermaid 图） |

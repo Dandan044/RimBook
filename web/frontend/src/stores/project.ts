@@ -18,6 +18,17 @@ export interface WriteTaskState {
   active: boolean
 }
 
+export interface VolumePlanState {
+  active: boolean
+  op: 'plan_volume' | 'assemble_volume' | ''
+  volume: number | null
+  step: number
+  status: 'idle' | 'running' | 'done'
+  phase: string
+  message: string
+  error: string | null
+}
+
 export const useProjectStore = defineStore('project', () => {
   const projects = ref<ProjectInfo[]>([])
   const currentId = ref<string>('')
@@ -28,9 +39,114 @@ export const useProjectStore = defineStore('project', () => {
   const writeTasks = ref<Record<number, WriteTaskState>>({})
   const writeTaskTimer = ref<ReturnType<typeof setInterval> | null>(null)
 
+  // Volume plan / assemble pipeline (survives tab switches & remounts).
+  const volumePlan = ref<VolumePlanState>({
+    active: false,
+    op: '',
+    volume: null,
+    step: 0,
+    status: 'idle',
+    phase: '',
+    message: '',
+    error: null,
+  })
+  let volumePlanSse: { close: () => void } | null = null
+
   const currentProject = computed(() =>
     projects.value.find(p => p.id === currentId.value)
   )
+
+  function patchVolumePlan(patch: Partial<VolumePlanState>) {
+    volumePlan.value = { ...volumePlan.value, ...patch }
+  }
+
+  function resetVolumePlan() {
+    volumePlanSse?.close()
+    volumePlanSse = null
+    volumePlan.value = {
+      active: false,
+      op: '',
+      volume: null,
+      step: 0,
+      status: 'idle',
+      phase: '',
+      message: '',
+      error: null,
+    }
+  }
+
+  function applyVolumePlanStep(data: {
+    step?: number
+    status?: string
+    phase?: string
+    message?: string
+    volume?: number
+    beat_count?: number
+  }) {
+    patchVolumePlan({
+      active: true,
+      step: data.step ?? volumePlan.value.step,
+      status: (data.status as VolumePlanState['status']) || volumePlan.value.status,
+      phase: data.phase ?? volumePlan.value.phase,
+      message: data.message || volumePlan.value.message,
+      volume: data.volume ?? volumePlan.value.volume,
+    })
+  }
+
+  function bindVolumePlanSse(handle: { close: () => void }, handlers?: {
+    onDone?: (data: unknown) => void
+    onError?: (msg: string) => void
+  }) {
+    volumePlanSse?.close()
+    volumePlanSse = {
+      close: () => {
+        handle.close()
+        volumePlanSse = null
+      },
+    }
+    // The actual SSE callbacks are wired by the caller via the handle's
+    // construction; this just owns the AbortController for teardown.
+    void handlers
+  }
+
+  function startVolumePlanTracking(opts: {
+    op: 'plan_volume' | 'assemble_volume'
+    volume: number
+    message?: string
+  }) {
+    patchVolumePlan({
+      active: true,
+      op: opts.op,
+      volume: opts.volume,
+      step: opts.op === 'assemble_volume' ? 3 : 1,
+      status: 'running',
+      phase: opts.op === 'assemble_volume' ? 'refining' : '',
+      message: opts.message || '准备中…',
+      error: null,
+    })
+  }
+
+  function finishVolumePlan(opts?: { error?: string }) {
+    volumePlanSse?.close()
+    volumePlanSse = null
+    if (opts?.error) {
+      patchVolumePlan({
+        active: false,
+        status: 'idle',
+        phase: '',
+        error: opts.error,
+        message: opts.error,
+      })
+    } else {
+      patchVolumePlan({
+        active: false,
+        status: 'done',
+        phase: '',
+        error: null,
+        message: '完成',
+      })
+    }
+  }
 
   function startWriteTracking(chapterNum: number, seed?: Partial<WriteTaskState>) {
     const prev = writeTasks.value[chapterNum]
@@ -121,6 +237,17 @@ export const useProjectStore = defineStore('project', () => {
             active: true,
           })
         }
+        if ((t.op === 'plan_volume' || t.op === 'assemble_volume') && t.chapter !== null) {
+          startVolumePlanTracking({
+            op: t.op as 'plan_volume' | 'assemble_volume',
+            volume: t.chapter,
+            message: t.progress,
+          })
+          // Notify OutlineEditor to re-attach SSE (avoids circular import).
+          window.dispatchEvent(new CustomEvent('volume-plan-resume', {
+            detail: { op: t.op, volume: t.chapter },
+          }))
+        }
       }
     } catch { /* no-op */ }
   }
@@ -165,7 +292,10 @@ export const useProjectStore = defineStore('project', () => {
 
   return {
     projects, currentId, status, loading, currentProject, writeTasks,
+    volumePlan,
     fetchProjects, createNew, removeProject, fetchStatus, selectProject,
     startWriteTracking, stopWriteTracking, updateWriteStream, checkPendingTasks,
+    patchVolumePlan, resetVolumePlan, applyVolumePlanStep,
+    startVolumePlanTracking, finishVolumePlan, bindVolumePlanSse,
   }
 })

@@ -21,7 +21,7 @@ import yaml
 
 from ..project import ProjectPaths
 from ..versioning import atomic_write
-from .models import ChapterOutline, SceneBeat, VolumeOutline
+from .models import ChapterOutline, SceneBeat, VolumeBeatData, VolumeOutline
 
 __all__ = ["OutlineStore"]
 
@@ -127,6 +127,34 @@ class OutlineStore:
         return nums
 
     # ==================================================================
+    # Volume Beats (volNN.beats.yaml)
+    # ==================================================================
+    def save_volume_beats(self, data: VolumeBeatData) -> Path:
+        """Persist the beat pipeline state for a volume."""
+        path = self.paths.volume_beats_file(data.volume)
+        payload = data.model_dump(mode="json")
+        atomic_write(path, yaml.dump(payload, allow_unicode=True, sort_keys=False, default_flow_style=False))
+        return path
+
+    def load_volume_beats(self, volume_number: int) -> VolumeBeatData | None:
+        """Load the beat pipeline state for a volume, or None if not found."""
+        path = self.paths.volume_beats_file(volume_number)
+        if not path.exists():
+            return None
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return None
+        return VolumeBeatData(**raw)
+
+    def delete_volume_beats(self, volume_number: int) -> bool:
+        """Remove the beats file for a volume. Returns False if it didn't exist."""
+        path = self.paths.volume_beats_file(volume_number)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    # ==================================================================
     # Chapters
     # ==================================================================
     def write_chapter(self, ch: ChapterOutline) -> Path:
@@ -141,8 +169,9 @@ class OutlineStore:
             "volume": ch.volume,
             "entities": ch.entities,
             "tags": ch.tags,
-            "beats": [b.model_dump() for b in ch.beats],
+            "beats": [b.model_dump(exclude_none=True) for b in ch.beats],
             "summary": ch.summary,
+            "keynote": list(ch.keynote or []),
             "purpose": ch.purpose,
             "value_shift": ch.value_shift,
             "tension": ch.tension,
@@ -263,6 +292,7 @@ class OutlineStore:
             tags=list(meta.get("tags") or []),
             beats=beats,
             notes=post.content.strip(),
+            keynote=_clean_keynote(meta.get("keynote")),
             summary=str(meta.get("summary", "")),
             purpose=str(meta.get("purpose", "") or ""),
             value_shift=str(meta.get("value_shift", "") or ""),
@@ -287,8 +317,34 @@ def _clean_beat(b: Any) -> dict[str, Any]:
     """Normalize a beat dict coming from YAML (tolerate extra keys)."""
     if not isinstance(b, dict):
         return {"goal": str(b)}
-    allowed = {"goal", "conflict", "outcome", "entities"}
-    return {k: v for k, v in b.items() if k in allowed}
+    allowed = {"goal", "conflict", "outcome", "entities", "scenes"}
+    out = {k: v for k, v in b.items() if k in allowed}
+    scenes_raw = out.get("scenes") or []
+    if isinstance(scenes_raw, list):
+        cleaned_scenes = []
+        for s in scenes_raw:
+            if not isinstance(s, dict):
+                continue
+            scene_allowed = {"action", "dialogue", "event", "technique", "pacing", "words"}
+            cleaned = {k: v for k, v in s.items() if k in scene_allowed}
+            try:
+                cleaned["words"] = max(int(cleaned.get("words") or 0), 0)
+            except (TypeError, ValueError):
+                cleaned["words"] = 0
+            cleaned_scenes.append(cleaned)
+        out["scenes"] = cleaned_scenes
+    return out
+
+
+def _clean_keynote(v: Any) -> list[str]:
+    if v is None:
+        return []
+    if isinstance(v, str):
+        lines = [ln.strip().lstrip("-• ").strip() for ln in v.splitlines()]
+        return [ln for ln in lines if ln]
+    if isinstance(v, list):
+        return [str(x).strip() for x in v if str(x).strip()]
+    return [str(v).strip()] if str(v).strip() else []
 
 
 def _safe_tension(v: Any) -> int:

@@ -49,11 +49,21 @@ export interface CodexEntry {
   relationships: { target: string; type: string; since_chapter: number; notes: string }[]
 }
 
+export interface MicroScene {
+  action: string
+  dialogue: string
+  event: string
+  technique: string
+  pacing: string
+  words: number
+}
+
 export interface SceneBeat {
   goal: string
   conflict: string
   outcome: string
   entities: string[]
+  scenes?: MicroScene[]
 }
 
 export interface ChapterOutline {
@@ -64,6 +74,7 @@ export interface ChapterOutline {
   tags: string[]
   beats: SceneBeat[]
   notes: string
+  keynote?: string[]
   summary: string
   purpose: string
   value_shift: string
@@ -188,6 +199,211 @@ export const deleteChapter = (projectId: string, number: number) =>
   http.delete<{ ok: boolean; chapter: number }>(
     `/projects/${projectId}/outline/chapters/${number}`,
   ).then(r => r.data)
+
+// ---------- Volume Planning v2 (beat chain → refine → assemble) ----------
+
+export interface RawBeat {
+  id: string
+  goal: string
+  conflict: string
+  outcome: string
+  entities: string[]
+  momentum: string
+}
+
+export interface RefinedBeat extends RawBeat {
+  technique: string
+  plot_detail: string
+  thematic_expr: string
+  pacing_note: string
+  is_bridge: boolean
+}
+
+export interface ChapterAssignment {
+  chapter: number
+  title: string
+  beat_ids: string[]
+  purpose: string
+  value_shift: string
+  tension: number
+  hook: string
+  story_date: string
+  elapsed: string
+}
+
+export interface VolumeBeatData {
+  volume: number
+  step: number  // 0=none, 2=raw beats, 3=refined+grouped
+  raw_beats: RawBeat[]
+  refined_beats: RefinedBeat[]
+  chapter_map: ChapterAssignment[]
+}
+
+export const getVolumeBeats = (projectId: string, volumeNumber: number) =>
+  http.get<VolumeBeatData>(`/projects/${projectId}/outline/volumes/${volumeNumber}/beats`).then(r => r.data)
+
+export const updateVolumeBeats = (projectId: string, volumeNumber: number, beats: RawBeat[]) =>
+  http.put<{ ok: boolean; beat_count: number }>(
+    `/projects/${projectId}/outline/volumes/${volumeNumber}/beats`, { beats },
+  ).then(r => r.data)
+
+export const addVolumeBeat = (projectId: string, volumeNumber: number, beat: Partial<RawBeat>) =>
+  http.post<{ ok: boolean; id: string }>(
+    `/projects/${projectId}/outline/volumes/${volumeNumber}/beats`, beat,
+  ).then(r => r.data)
+
+export const deleteVolumeBeat = (projectId: string, volumeNumber: number, beatId: string) =>
+  http.delete<{ ok: boolean }>(
+    `/projects/${projectId}/outline/volumes/${volumeNumber}/beats/${beatId}`,
+  ).then(r => r.data)
+
+export const reorderVolumeBeats = (projectId: string, volumeNumber: number, orderedIds: string[]) =>
+  http.put<{ ok: boolean }>(
+    `/projects/${projectId}/outline/volumes/${volumeNumber}/beats/reorder`, { ordered_ids: orderedIds },
+  ).then(r => r.data)
+
+export interface PlanSSEHandlers {
+  onProgress?: (msg: string) => void
+  onStep?: (data: { step: number; status: string; phase?: string; [key: string]: unknown }) => void
+  onError?: (msg: string) => void
+  onDone?: (data: unknown) => void
+}
+
+export interface PlanSSEHandle {
+  close: () => void
+}
+
+/** Stream the full v2 volume planning pipeline (Step 1+2+3) via SSE. */
+export function planVolumeSSE(
+  projectId: string,
+  handlers: PlanSSEHandlers,
+  title?: string,
+  opts?: { resume?: boolean },
+): PlanSSEHandle {
+  const ctrl = new AbortController()
+  const qs = opts?.resume ? '?resume=1' : ''
+  const url = `/api/projects/${projectId}/outline/volumes/plan${qs}`
+
+  ;(async () => {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify({ title: title || '' }),
+        signal: ctrl.signal,
+        cache: 'no-store',
+      })
+      if (!res.ok || !res.body) {
+        handlers.onError?.(`连接失败（HTTP ${res.status}）`)
+        return
+      }
+      await _readSSEStream(res, handlers)
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return
+      handlers.onError?.(e?.message || '连接中断')
+    }
+  })()
+
+  return { close: () => ctrl.abort() }
+}
+
+/** Re-run Step 3 (refine + assemble) via SSE. */
+export function assembleVolumeSSE(
+  projectId: string,
+  volumeNumber: number,
+  handlers: PlanSSEHandlers,
+  opts?: { resume?: boolean },
+): PlanSSEHandle {
+  const ctrl = new AbortController()
+  const qs = opts?.resume ? '?resume=1' : ''
+  const url = `/api/projects/${projectId}/outline/volumes/${volumeNumber}/assemble${qs}`
+
+  ;(async () => {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        signal: ctrl.signal,
+        cache: 'no-store',
+      })
+      if (!res.ok || !res.body) {
+        handlers.onError?.(`连接失败（HTTP ${res.status}）`)
+        return
+      }
+      await _readSSEStream(res, handlers)
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return
+      handlers.onError?.(e?.message || '连接中断')
+    }
+  })()
+
+  return { close: () => ctrl.abort() }
+}
+
+export interface VolumePlanStatus {
+  active: boolean
+  finished: boolean
+  op: string
+  volume: number | null
+  progress: string
+  step: { step?: number; status?: string; phase?: string; message?: string; volume?: number } | null
+  error: string | null
+  started_at?: string
+}
+
+export const getVolumePlanStatus = (projectId: string) =>
+  http.get<VolumePlanStatus>(`/projects/${projectId}/outline/volumes/plan-status`).then(r => r.data)
+
+/** Shared SSE stream reader for plan/assemble endpoints. */
+async function _readSSEStream(res: Response, handlers: PlanSSEHandlers) {
+  const reader = res.body!.getReader()
+  const decoder = new TextDecoder('utf-8')
+  let buffer = ''
+  let currentEvent = 'message'
+  let dataLines: string[] = []
+
+  const dispatch = () => {
+    if (!dataLines.length) { currentEvent = 'message'; return }
+    const raw = dataLines.join('\n')
+    dataLines = []
+    const event = currentEvent
+    currentEvent = 'message'
+    if (raw === '' || raw === '[DONE]') return
+
+    let parsed: any = raw
+    try { parsed = JSON.parse(raw) } catch { /* keep string */ }
+
+    switch (event) {
+      case 'progress':
+        handlers.onProgress?.(parsed?.message ?? String(parsed))
+        break
+      case 'step':
+        handlers.onStep?.(parsed)
+        break
+      case 'error':
+        handlers.onError?.(parsed?.message || String(parsed))
+        break
+      case 'done':
+        handlers.onDone?.(parsed)
+        break
+    }
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const parts = buffer.split(/\r?\n/)
+    buffer = parts.pop() ?? ''
+    for (const line of parts) {
+      if (line === '') { dispatch(); continue }
+      if (line.startsWith(':')) continue
+      if (line.startsWith('event:')) { currentEvent = line.slice(6).trim(); continue }
+      if (line.startsWith('data:')) { dataLines.push(line.slice(5).trimStart()) }
+    }
+  }
+  dispatch()
+}
 
 // ---------- Narrative: style bible / threads / recap / review ----------
 

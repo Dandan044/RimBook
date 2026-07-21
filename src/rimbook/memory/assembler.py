@@ -348,7 +348,7 @@ class ContextAssembler:
         # --- 7. The chapter beat itself --------------------------------
         beat_text = self._format_beat(chapter)
         beat_full = (
-            f"## 本章任务（必须按此推进剧情）\n{beat_text}"
+            f"## 本章任务（基调渗透、细场景演出；禁止复述清单）\n{beat_text}"
         )
         emit(beat_full)
         section_list.append(SectionInfo(
@@ -534,7 +534,42 @@ class ContextAssembler:
             if chapter.elapsed:
                 line += f"（距上一章：{chapter.elapsed}）"
             lines.append(line)
-        if chapter.beats:
+
+        if chapter.keynote:
+            lines.append("")
+            lines.append("【章基调 — 必须渗透进剧情，禁止在正文中明说或总结】")
+            for k in chapter.keynote:
+                lines.append(f"- {k}")
+            lines.append("")
+
+        has_micro = any(b.scenes for b in chapter.beats)
+        if chapter.beats and has_micro:
+            lines.append("细场景计划（按此推进体验，禁止逐条复述目标/结果）：")
+            for i, b in enumerate(chapter.beats, 1):
+                anchor = b.goal or f"场景{i}"
+                lines.append(f"  Beat {i}｜锚点：{anchor}")
+                if b.conflict:
+                    lines.append(f"    （冲突：{b.conflict}）")
+                for j, s in enumerate(b.scenes, 1):
+                    meta_bits = []
+                    if s.words:
+                        meta_bits.append(f"约{s.words}字")
+                    if s.pacing:
+                        meta_bits.append(s.pacing)
+                    if s.technique:
+                        meta_bits.append(s.technique)
+                    meta = "·".join(meta_bits) if meta_bits else ""
+                    head = f"    {j}{'（' + meta + '）' if meta else ''}："
+                    lines.append(head)
+                    if s.action:
+                        lines.append(f"      动作：{s.action}")
+                    if s.dialogue:
+                        lines.append(f"      对白方向：{s.dialogue}")
+                    if s.event:
+                        lines.append(f"      事件：{s.event}")
+                if b.entities:
+                    lines.append(f"    涉及：{'、'.join(b.entities)}")
+        elif chapter.beats:
             lines.append("场景计划：")
             for i, b in enumerate(chapter.beats, 1):
                 lines.append(f"  场景{i}：")

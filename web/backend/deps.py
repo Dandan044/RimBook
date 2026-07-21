@@ -24,6 +24,7 @@ from rimbook.memory import (
     SlidingWindow,
     Summarizer,
 )
+from rimbook.memory.threads import ThreadStore
 from rimbook.outline import OutlineStore
 from rimbook.pipeline import Checker, Planner, Writer
 from rimbook.project import ProjectPaths, scaffold_project
@@ -102,7 +103,11 @@ class ProjectDeps:
 
     @property
     def planner(self) -> Planner:
-        return Planner(self.llm, PROMPTS, self.outline)
+        return Planner(
+            self.llm, PROMPTS, self.outline,
+            codex=self.codex,
+            threads=ThreadStore(self.paths),
+        )
 
     @property
     def checker(self) -> Checker:

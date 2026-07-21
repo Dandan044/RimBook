@@ -105,6 +105,10 @@ class ProjectPaths:
     def volume_outline(self, number: int) -> Path:
         return self.volumes_dir / f"vol{number:02d}.md"
 
+    def volume_beats_file(self, number: int) -> Path:
+        """Beat pipeline data for a volume (volNN.beats.yaml)."""
+        return self.volumes_dir / f"vol{number:02d}.beats.yaml"
+
     # --- prose -----------------------------------------------------------
     @property
     def drafts_dir(self) -> Path:

@@ -7,6 +7,33 @@
       </h1>
     </div>
 
+    <!-- Persistent volume-plan progress (survives tab switches) -->
+    <div v-if="volumePlan.active || (volumePlan.step > 0 && volumePlan.status === 'running')" class="plan-banner">
+      <div class="plan-banner-steps">
+        <div
+          v-for="s in planSteps"
+          :key="s.num"
+          class="plan-banner-step"
+          :class="{
+            active: volumePlan.step === s.num && volumePlan.status === 'running',
+            done: volumePlan.step > s.num || (volumePlan.step === s.num && volumePlan.status === 'done'),
+          }"
+        >
+          <span class="plan-banner-dot">
+            <el-icon v-if="volumePlan.step === s.num && volumePlan.status === 'running'" class="is-loading"><Loading /></el-icon>
+            <el-icon v-else-if="volumePlan.step > s.num || (volumePlan.step === s.num && volumePlan.status === 'done')"><Check /></el-icon>
+            <template v-else>{{ s.num }}</template>
+          </span>
+          <span>{{ s.label }}</span>
+        </div>
+      </div>
+      <div class="plan-banner-msg">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        <span>{{ volumePlan.message || '正在规划…' }}</span>
+        <span v-if="volumePlan.volume" class="plan-banner-vol">第 {{ volumePlan.volume }} 卷</span>
+      </div>
+    </div>
+
     <el-tabs v-model="mainTab" class="planning-tabs">
       <el-tab-pane label="大纲" name="outline">
         <div class="outline-tab">
@@ -36,7 +63,7 @@
               <span class="ai-hero-icon"><el-icon :size="22"><FolderAdd /></el-icon></span>
               <span class="ai-hero-body">
                 <span class="ai-hero-title">新卷</span>
-                <span class="ai-hero-desc">规划卷大纲、结局，并生成卷内全部章 beat</span>
+                <span class="ai-hero-desc">规划卷大纲 → 生成连续 beat 链 → 细化并组装为章节</span>
               </span>
               <el-icon v-if="generating" class="is-loading ai-hero-loading"><Loading /></el-icon>
             </button>
@@ -124,6 +151,15 @@
                     <el-icon><Delete /></el-icon> 删除卷
                   </el-button>
                 </div>
+
+                <!-- Volume Beat Pipeline Panel -->
+                <VolumeBeatPanel
+                  v-if="store.currentId && editingVolume"
+                  ref="beatPanelRef"
+                  :project-id="store.currentId"
+                  :volume-number="editingVolume.number"
+                  @assembled="fetchData"
+                />
               </div>
             </div>
 
@@ -173,12 +209,26 @@
                   </el-form>
                 </div>
 
+                <div class="keynote-section">
+                  <h3 class="beats-heading">章基调</h3>
+                  <p class="keynote-hint">隐性约束：必须渗透进剧情，禁止在正文中明说或总结。</p>
+                  <div v-for="(_k, ki) in chapterForm.keynote" :key="'kn'+ki" class="keynote-row">
+                    <el-input v-model="chapterForm.keynote[ki]" size="small" placeholder="如：林默只知道晶化传言，不知道病毒真相" />
+                    <el-button type="danger" size="small" text @click="chapterForm.keynote.splice(ki, 1)">
+                      <el-icon><Delete /></el-icon>
+                    </el-button>
+                  </div>
+                  <el-button size="small" @click="chapterForm.keynote.push('')">
+                    <el-icon><Plus /></el-icon> 添加基调
+                  </el-button>
+                </div>
+
                 <div class="beats-section">
-                  <h3 class="beats-heading">场景 Beat</h3>
+                  <h3 class="beats-heading">场景 Beat / 细场景</h3>
                   <div v-for="(beat, i) in chapterForm.beats" :key="i" class="beat-item">
                     <div class="beat-card">
                       <div class="beat-header">
-                        <span class="beat-number">场景 {{ i + 1 }}</span>
+                        <span class="beat-number">Beat {{ i + 1 }}</span>
                         <el-button type="danger" size="small" text @click="chapterForm.beats.splice(i, 1)">
                           <el-icon><Delete /></el-icon>
                         </el-button>
@@ -189,15 +239,42 @@
                         <el-form-item label="结果"><el-input v-model="beat.outcome" /></el-form-item>
                         <el-form-item label="实体"><el-select v-model="beat.entities" multiple filterable allow-create default-first-option /></el-form-item>
                       </el-form>
+
+                      <div class="micro-scenes">
+                        <div class="micro-scenes-title">细场景（{{ (beat.scenes || []).length }}）</div>
+                        <div v-for="(sc, si) in (beat.scenes || [])" :key="si" class="micro-card">
+                          <div class="beat-header">
+                            <span class="beat-number">细场景 {{ si + 1 }}</span>
+                            <el-button type="danger" size="small" text @click="beat.scenes!.splice(si, 1)">
+                              <el-icon><Delete /></el-icon>
+                            </el-button>
+                          </div>
+                          <el-form label-width="70px" size="small">
+                            <el-form-item label="动作"><el-input v-model="sc.action" type="textarea" :rows="2" /></el-form-item>
+                            <el-form-item label="对白方向"><el-input v-model="sc.dialogue" /></el-form-item>
+                            <el-form-item label="事件"><el-input v-model="sc.event" /></el-form-item>
+                            <el-form-item label="手法"><el-input v-model="sc.technique" /></el-form-item>
+                            <el-form-item label="节奏"><el-input v-model="sc.pacing" placeholder="缓起/加速/留白/爆发…" /></el-form-item>
+                            <el-form-item label="篇幅">
+                              <el-input-number v-model="sc.words" :min="0" :step="50" controls-position="right" />
+                            </el-form-item>
+                          </el-form>
+                        </div>
+                        <el-button size="small" @click="addMicroScene(beat)">
+                          <el-icon><Plus /></el-icon> 添加细场景
+                        </el-button>
+                      </div>
                     </div>
                   </div>
-                  <el-button size="small" @click="chapterForm.beats.push({ goal: '', conflict: '', outcome: '', entities: [] })">
-                    <el-icon><Plus /></el-icon> 添加场景
+                  <el-button size="small" @click="chapterForm.beats.push({ goal: '', conflict: '', outcome: '', entities: [], scenes: [] })">
+                    <el-icon><Plus /></el-icon> 添加 Beat
                   </el-button>
                 </div>
 
                 <el-form label-width="60px" style="margin-top:20px">
-                  <el-form-item label="附注"><el-input v-model="chapterForm.notes" type="textarea" :rows="4" /></el-form-item>
+                  <el-form-item label="附注">
+                    <el-input v-model="chapterForm.notes" type="textarea" :rows="3" placeholder="作者备忘（可选，不再承载手法/剧情）" />
+                  </el-form-item>
                 </el-form>
                 <div class="editor-footer">
                   <el-button type="primary" @click="saveChapter">
@@ -255,22 +332,32 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/project'
 import {
   getSynopsis, updateSynopsis, generateSynopsis as apiGenerateSynopsis,
   listVolumes, planVolume, updateVolume, deleteVolume,
   listChapters, planChapter, updateChapter, regenerateChapter, deleteChapter,
-  type VolumeOutline, type ChapterOutline, type SceneBeat,
+  planVolumeSSE, assembleVolumeSSE, getVolumePlanStatus,
+  type VolumeOutline, type ChapterOutline, type SceneBeat, type MicroScene,
+  type PlanSSEHandle,
 } from '../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import NarrativePanel from './Narrative.vue'
+import VolumeBeatPanel from './VolumeBeatPanel.vue'
 
 const store = useProjectStore()
 const route = useRoute()
 const router = useRouter()
-const generating = ref(false)
+const localBusy = ref(false)
+const generating = computed(() => localBusy.value || store.volumePlan.active)
+const volumePlan = computed(() => store.volumePlan)
+const planSteps = [
+  { num: 1, label: '卷规划' },
+  { num: 2, label: 'Beat 链' },
+  { num: 3, label: '细化组装' },
+]
 const deleting = ref(false)
 const mainTab = ref('outline')
 
@@ -302,12 +389,127 @@ const showSynopsisDialog = ref(false)
 const premiseText = ref('')
 const synopsisOverwrite = ref(false)
 
+const beatPanelRef = ref<InstanceType<typeof VolumeBeatPanel> | null>(null)
+let planSseHandle: PlanSSEHandle | null = null
+
+function wireVolumePlanHandlers(opts?: { onDoneExtra?: () => void | Promise<void> }) {
+  return {
+    onProgress: (msg: string) => {
+      store.patchVolumePlan({ message: msg, active: true, status: 'running' })
+      beatPanelRef.value?.setRunning(true, msg)
+    },
+    onStep: (data: { step: number; status: string; phase?: string; message?: string; beats?: unknown[]; volume?: number | { number?: number } }) => {
+      const volNum = typeof data.volume === 'number'
+        ? data.volume
+        : (data.volume && typeof data.volume === 'object' ? data.volume.number : undefined)
+      store.applyVolumePlanStep({
+        ...data,
+        volume: volNum,
+        message: data.message || (data.status === 'running' ? `步骤 ${data.step} 进行中…` : data.status === 'done' ? `步骤 ${data.step} 完成` : ''),
+      })
+      if (volNum) store.patchVolumePlan({ volume: volNum })
+      // Default progress messages when backend omits them on done events.
+      if (!data.message) {
+        if (data.status === 'running') {
+          const defaults: Record<number, string> = {
+            1: '正在生成卷大纲与结局…',
+            2: '正在生成连续 beat 链…',
+            3: '正在细化并组装章节…',
+          }
+          store.patchVolumePlan({ message: defaults[data.step] || store.volumePlan.message })
+        } else if (data.status === 'done') {
+          const defaults: Record<number, string> = {
+            1: '卷大纲已生成',
+            2: 'Beat 链已生成',
+            3: '章节组装完成',
+          }
+          store.patchVolumePlan({ message: defaults[data.step] || store.volumePlan.message })
+        }
+      }
+      beatPanelRef.value?.handlePipelineStep(data as any)
+    },
+    onError: (msg: string) => {
+      store.finishVolumePlan({ error: msg })
+      beatPanelRef.value?.setRunning(false)
+      ElMessage.error(msg)
+    },
+    onDone: async () => {
+      const volNum = store.volumePlan.volume
+      store.finishVolumePlan()
+      beatPanelRef.value?.setRunning(false)
+      await fetchData()
+      if (volNum && volumes.value.length) {
+        const vol = volumes.value.find(v => v.number === volNum) || volumes.value[volumes.value.length - 1]
+        editing.value = 'volume'
+        editingVolume.value = vol
+        Object.assign(volumeForm, { title: vol.title, arc: vol.arc, ending: vol.ending })
+        beatPanelRef.value?.loadBeats()
+      }
+      await opts?.onDoneExtra?.()
+      ElMessage.success('卷规划完成（含 beat 细化与章节组装）')
+    },
+  }
+}
+
+function attachVolumePlanSse(opts?: { resume?: boolean; title?: string; volume?: number; op?: string }) {
+  if (!store.currentId) return
+  planSseHandle?.close()
+  const handlers = wireVolumePlanHandlers()
+  const resume = !!opts?.resume
+  if (opts?.op === 'assemble_volume' && opts.volume) {
+    planSseHandle = assembleVolumeSSE(store.currentId, opts.volume, handlers, { resume })
+  } else {
+    planSseHandle = planVolumeSSE(store.currentId, handlers, opts?.title || '', { resume })
+  }
+  store.bindVolumePlanSse(planSseHandle)
+}
+
+async function resumeVolumePlanIfNeeded() {
+  if (!store.currentId) return
+  try {
+    const st = await getVolumePlanStatus(store.currentId)
+    if (!st.active || !st.volume) return
+    store.startVolumePlanTracking({
+      op: (st.op as 'plan_volume' | 'assemble_volume') || 'plan_volume',
+      volume: st.volume,
+      message: st.progress || '恢复进度…',
+    })
+    if (st.step) store.applyVolumePlanStep(st.step)
+    attachVolumePlanSse({
+      resume: true,
+      volume: st.volume,
+      op: st.op,
+    })
+  } catch { /* ignore */ }
+}
+
+function onVolumePlanResume(ev: Event) {
+  const detail = (ev as CustomEvent).detail || {}
+  attachVolumePlanSse({ resume: true, volume: detail.volume, op: detail.op })
+}
+
 const volumeForm = reactive({ title: '', arc: '', ending: '' })
 const chapterForm = reactive({
   title: '', volume: null as number | null, entities: [] as string[],
   tags: [] as string[], beats: [] as SceneBeat[], notes: '',
+  keynote: [] as string[],
   purpose: '', value_shift: '', tension: 0, hook: '', story_date: '', elapsed: '',
 })
+
+function addMicroScene(beat: SceneBeat) {
+  if (!beat.scenes) beat.scenes = []
+  beat.scenes.push({ action: '', dialogue: '', event: '', technique: '', pacing: '', words: 300 })
+}
+
+function cloneBeat(b: SceneBeat): SceneBeat {
+  return {
+    goal: b.goal,
+    conflict: b.conflict,
+    outcome: b.outcome,
+    entities: [...(b.entities || [])],
+    scenes: (b.scenes || []).map((s: MicroScene) => ({ ...s })),
+  }
+}
 
 const treeData = computed(() => {
   const children: any[] = []
@@ -355,8 +557,9 @@ function onNodeClick(node: any) {
       volume: node.chapter.volume,
       entities: [...node.chapter.entities],
       tags: [...node.chapter.tags],
-      beats: node.chapter.beats.map((b: SceneBeat) => ({ ...b, entities: [...b.entities] })),
+      beats: node.chapter.beats.map((b: SceneBeat) => cloneBeat(b)),
       notes: node.chapter.notes,
+      keynote: [...(node.chapter.keynote || [])],
       purpose: node.chapter.purpose || '',
       value_shift: node.chapter.value_shift || '',
       tension: node.chapter.tension || 0,
@@ -423,7 +626,7 @@ async function generateSynopsis() {
 
 async function doGenerateSynopsis() {
   if (!store.currentId) return
-  generating.value = true
+  localBusy.value = true
   try {
     const r = await apiGenerateSynopsis(store.currentId, premiseText.value)
     synopsisText.value = r.text
@@ -431,7 +634,7 @@ async function doGenerateSynopsis() {
     editing.value = 'synopsis'
     ElMessage.success('梗概已生成')
   } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '生成失败') }
-  finally { generating.value = false }
+  finally { localBusy.value = false }
 }
 
 async function confirmAddVolume() {
@@ -441,8 +644,8 @@ async function confirmAddVolume() {
     : 1
   try {
     await ElMessageBox.confirm(
-      `将由 AI 规划第 ${nextNum} 卷（大纲 + 结局），并一次性生成该卷全部章节 beat。已存在的卷不能重复规划。是否继续？`,
-      '规划新卷',
+      `将由 AI 规划第 ${nextNum} 卷：\n① 生成卷大纲与结局\n② 生成连续叙事 beat 链\n③ 细化 beat 并组装为章节\n\n全流程约需 1-2 分钟，完成后你可以编辑 beat 再重新组装。是否继续？`,
+      '规划新卷（v2 管线）',
       {
         type: 'info',
         confirmButtonText: '开始规划',
@@ -457,24 +660,16 @@ async function confirmAddVolume() {
 
 async function addVolume() {
   if (!store.currentId) return
-  generating.value = true
-  try {
-    const result = await planVolume(store.currentId)
-    await fetchData()
-    editing.value = 'volume'
-    editingVolume.value = result.volume
-    Object.assign(volumeForm, {
-      title: result.volume.title,
-      arc: result.volume.arc,
-      ending: result.volume.ending,
-    })
-    const n = result.chapters?.length || 0
-    ElMessage.success(`第${result.volume.number}卷已规划，并生成 ${n} 章 beat`)
-  } catch (e: any) {
-    ElMessage.error(e?.response?.data?.detail || '规划失败')
-  } finally {
-    generating.value = false
-  }
+  const nextNum = volumes.value.length
+    ? Math.max(...volumes.value.map(v => v.number)) + 1
+    : 1
+  store.startVolumePlanTracking({
+    op: 'plan_volume',
+    volume: nextNum,
+    message: `正在规划第 ${nextNum} 卷…`,
+  })
+  beatPanelRef.value?.setRunning(true, `正在规划第 ${nextNum} 卷…`)
+  attachVolumePlanSse({ title: '' })
 }
 
 async function confirmAddChapter() {
@@ -509,7 +704,7 @@ async function addChapter() {
     ElMessage.warning('请先规划卷，才能生成章节')
     return
   }
-  generating.value = true
+  localBusy.value = true
   try {
     const lastVol = volumes.value[volumes.value.length - 1].number
     const c = await planChapter(store.currentId, { volume: lastVol })
@@ -518,7 +713,7 @@ async function addChapter() {
   } catch (e: any) {
     ElMessage.error(e?.response?.data?.detail || '规划失败')
   } finally {
-    generating.value = false
+    localBusy.value = false
   }
 }
 
@@ -530,7 +725,7 @@ async function generateBeat() {
     ElMessage.warning('请先为本章指定所属卷并保存')
     return
   }
-  generating.value = true
+  localBusy.value = true
   try {
     const chNum = editingChapter.value.number
     const c = await regenerateChapter(store.currentId, chNum, {
@@ -542,14 +737,15 @@ async function generateBeat() {
     else chapters.value.push(c)
     Object.assign(chapterForm, {
       title: c.title, volume: c.volume, entities: [...c.entities], tags: [...c.tags],
-      beats: c.beats.map(b => ({ ...b, entities: [...b.entities] })), notes: c.notes,
+      beats: c.beats.map(b => cloneBeat(b)), notes: c.notes,
+      keynote: [...(c.keynote || [])],
       purpose: c.purpose || '', value_shift: c.value_shift || '', tension: c.tension || 0,
       hook: c.hook || '', story_date: c.story_date || '', elapsed: c.elapsed || '',
     })
     editingChapter.value = c
     ElMessage.success('Beat 已重新生成')
   } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '生成失败') }
-  finally { generating.value = false }
+  finally { localBusy.value = false }
 }
 
 async function confirmDeleteVolume() {
@@ -632,6 +828,7 @@ async function saveChapter() {
     title: chapterForm.title, volume: chapterForm.volume,
     entities: chapterForm.entities, tags: chapterForm.tags,
     beats: chapterForm.beats, notes: chapterForm.notes,
+    keynote: chapterForm.keynote.filter(k => k.trim()),
     purpose: chapterForm.purpose, value_shift: chapterForm.value_shift,
     tension: chapterForm.tension, hook: chapterForm.hook,
     story_date: chapterForm.story_date, elapsed: chapterForm.elapsed,
@@ -640,7 +837,15 @@ async function saveChapter() {
   await fetchData()
 }
 
-onMounted(fetchData)
+onMounted(async () => {
+  await fetchData()
+  await resumeVolumePlanIfNeeded()
+  window.addEventListener('volume-plan-resume', onVolumePlanResume)
+})
+onUnmounted(() => {
+  window.removeEventListener('volume-plan-resume', onVolumePlanResume)
+  // Keep SSE alive in store across remounts — do not abort here.
+})
 </script>
 
 <style scoped>
@@ -655,6 +860,69 @@ onMounted(fetchData)
 .page-header {
   margin-bottom: 12px;
   flex-shrink: 0;
+}
+
+.plan-banner {
+  margin-bottom: 14px;
+  padding: 12px 16px;
+  border: 1px solid var(--rb-border-light, #e5e7eb);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(99, 102, 241, 0.06), rgba(255, 255, 255, 0.9));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.plan-banner-steps {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.plan-banner-step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--rb-text-muted, #9ca3af);
+  font-weight: 500;
+}
+
+.plan-banner-step.active {
+  color: var(--rb-primary, #6366f1);
+  font-weight: 600;
+}
+
+.plan-banner-step.done {
+  color: var(--el-color-success, #67c23a);
+}
+
+.plan-banner-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.plan-banner-msg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--rb-text-secondary, #6b7280);
+}
+
+.plan-banner-vol {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--rb-primary, #6366f1);
+  font-weight: 600;
 }
 
 .page-title {
@@ -937,6 +1205,46 @@ onMounted(fetchData)
   text-transform: uppercase;
   letter-spacing: 0.06em;
   margin: 0 0 14px;
+}
+
+.keynote-section {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rb-border-light);
+}
+
+.keynote-hint {
+  margin: -6px 0 12px;
+  font-size: 12px;
+  color: var(--rb-text-muted);
+}
+
+.keynote-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.micro-scenes {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--rb-border-light);
+}
+
+.micro-scenes-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--rb-text-secondary);
+  margin-bottom: 8px;
+}
+
+.micro-card {
+  background: var(--rb-bg-surface, #fff);
+  border: 1px solid var(--rb-border-light);
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 8px;
 }
 
 .beat-item {

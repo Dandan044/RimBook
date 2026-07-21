@@ -259,6 +259,7 @@ class LLMClient:
         *,
         model: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         """Run a completion whose output should be a JSON object.
 
@@ -275,6 +276,7 @@ class LLMClient:
             messages,
             model=model,
             temperature=0.0 if temperature is None else temperature,
+            max_tokens=max_tokens,
         )
         data = _extract_json(result.content)
         if not isinstance(data, dict):

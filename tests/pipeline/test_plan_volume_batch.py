@@ -40,6 +40,7 @@ class FakeLLM:
         *,
         model: str | None = None,
         temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> dict[str, Any]:
         self.calls.append(list(messages))
         if not self._json_responses:

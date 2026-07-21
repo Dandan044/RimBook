@@ -10,7 +10,12 @@ from .models import (
     ChapterOutline,
     VolumeOutline,
     SceneBeat,
+    MicroScene,
     ChapterSummary,
+    RawBeat,
+    RefinedBeat,
+    ChapterAssignment,
+    VolumeBeatData,
 )
 from .store import OutlineStore
 
@@ -18,6 +23,11 @@ __all__ = [
     "ChapterOutline",
     "VolumeOutline",
     "SceneBeat",
+    "MicroScene",
     "ChapterSummary",
+    "RawBeat",
+    "RefinedBeat",
+    "ChapterAssignment",
+    "VolumeBeatData",
     "OutlineStore",
 ]
