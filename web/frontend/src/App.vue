@@ -31,7 +31,7 @@
         </el-menu-item>
         <el-menu-item index="/codex">
           <el-icon><Collection /></el-icon>
-          <template #title>设定集</template>
+          <template #title>已揭示设定集</template>
         </el-menu-item>
         <el-menu-item index="/workflow">
           <el-icon><Connection /></el-icon>

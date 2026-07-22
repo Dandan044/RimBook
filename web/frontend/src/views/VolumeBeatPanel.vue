@@ -14,7 +14,7 @@
           <span v-else>{{ s.num }}</span>
         </div>
         <span class="step-label">{{ s.label }}</span>
-        <div v-if="s.num < 3" class="step-line" :class="{ filled: currentStep > s.num }" />
+        <div v-if="s.num < 4" class="step-line" :class="{ filled: currentStep > s.num }" />
       </div>
       <span v-if="phaseLabel" class="phase-label">{{ phaseLabel }}</span>
     </div>
@@ -143,9 +143,10 @@ const emit = defineEmits<{
 const store = useProjectStore()
 
 const steps = [
-  { num: 1, label: '卷规划' },
-  { num: 2, label: 'Beat 链' },
-  { num: 3, label: '细化组装' },
+  { num: 1, label: '卷大纲' },
+  { num: 2, label: '设定扩充' },
+  { num: 3, label: 'Beat 链' },
+  { num: 4, label: '细化组装' },
 ]
 
 const loaded = ref(false)
@@ -285,7 +286,7 @@ async function doDeleteBeat(beatId: string) {
 function doAssemble() {
   running.value = true
   progressMsg.value = '正在细化 beat 并组装章节…'
-  currentStep.value = 3
+  currentStep.value = 4
   stepStatus.value = 'running'
   phase.value = 'refining'
   store.startVolumePlanTracking({

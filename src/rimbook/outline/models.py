@@ -96,7 +96,7 @@ class VolumeBeatData(BaseModel):
     """The full beat pipeline state for one volume, stored as volNN.beats.yaml."""
 
     volume: int
-    step: int = Field(default=2, description="Pipeline progress: 2=raw beats done, 3=grouped+microscened.")
+    step: int = Field(default=3, description="Pipeline progress: 3=raw beats done, 4=grouped+microscened.")
     raw_beats: list[RawBeat] = Field(default_factory=list)
     refined_beats: list[RefinedBeat] = Field(default_factory=list)
     chapter_map: list[ChapterAssignment] = Field(default_factory=list)

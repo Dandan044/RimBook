@@ -30,33 +30,198 @@ class Prompts:
     # ------------------------------------------------------------------
     synopsis_system: str = (
         "你是一位资深小说策划。根据用户提供的创意，产出一部完整小说的"
-        "「全书梗概」。要求：明确主题与情感基调、目标读者与篇幅预期、"
+        "「宏观全书梗概」。要求：明确主题与情感基调、目标读者与篇幅预期、"
         "叙事结构（线性/多线/倒叙等）、核心冲突体系（主线+支线）、"
-        "主线剧情、主要实体轮廓、世界观核心设定与规则体系、以及预期结局。"
-        "控制在 600-900 字。"
+        "宏观主线与预期结局。"
+        "不要展开具体角色档案、地点细节或世界观百科；这些将在后续「完整设定集」步骤单独建立。"
+        "控制在 400-600 字。"
     )
 
     synopsis_user: str = (
-        "请根据以下创意，撰写全书梗概。务必按系统提示中的各维度"
+        "请根据以下创意，撰写宏观全书梗概。务必按系统提示中的各维度"
         "（主题/情感基调/目标读者/篇幅预期/叙事结构/核心冲突体系/"
-        "主线剧情/实体轮廓/世界观规则体系/预期结局）逐项产出：\n\n{premise}\n"
+        "宏观主线/预期结局）逐项产出，不要泄露具体设定细节：\n\n{premise}\n"
+    )
+
+    foundation_synopsis_system: str = (
+        "你是一位资深小说策划。根据用户创意，产出「宏观全书梗概」。"
+        "只写主题、情感基调、叙事结构、核心冲突、宏观主线与预期结局。"
+        "禁止展开具体角色/地点/物品/势力/世界观细则。400-600 字。"
+    )
+
+    foundation_synopsis_user: str = (
+        "创意输入：\n{premise}\n\n"
+        "请撰写宏观全书梗概（Markdown 正文，不要 JSON）。"
+    )
+
+    foundation_codex_system: str = (
+        "你是小说幕后设定策划。根据创意、宏观梗概与已有完整设定集，"
+        "初始化或补充作者侧「完整设定集」。可包含秘密和真实议程；"
+        "这些内容仅供规划，不得当作读者已知事实。\n"
+        "六类均按需生成：character、worldbuilding、location、faction、item、timeline。\n"
+        "【存在性硬规则】完整设定集只收录在故事开篇锚点已经真实存在的事物。"
+        "尚未被正文提及不等于不存在：一座早已存在的城市可以收录。"
+        "但未来才出生的人、未来才成立的聚落/势力、未来才制造的物品不得提前建档。"
+        "此类候选必须改写成 type=timeline 的未来成立事件并标记 exists_at_anchor=false；"
+        "不得同时创建尚未成立的地点/势力/人物/物品条目。\n"
+        "【首次登场】reveal_strategy 只描述该存在第一次进入正文的触发钩子和呈现途径，"
+        "不是把它的秘密或全部历史一次性揭底。\n"
+        "这是粗略建档步骤：每个字段保持1-3句，details 只放少量结构化关键词，"
+        "不要在此输出长篇生平或历史，后续会逐条细化。\n"
+        "【输出格式】仅输出 JSON：\n"
+        '{"entries":[{"id":"稳定id","name":"名称","type":"character|worldbuilding|location|faction|item|timeline",'
+        '"aliases":[],"tags":[],"surface_summary":"公开面摘要","secret_truth":"幕后真相",'
+        '"narrative_role":"叙事职责","reveal_strategy":"首次进入正文的方式",'
+        '"details":{},"revealed_ref":"","exists_at_anchor":true,"existence_reason":"为何此时已存在",'
+        '"formation_event":null}],'
+        '"relationships":[{"id":"关系id","source_id":"...","target_id":"...",'
+        '"relationship_type":"...","conflict":"...","stakes":"..."}]}\n'
+        "无效条目会被跳过，但 JSON 整体必须可解析。不要输出额外文字。"
+    )
+
+    foundation_codex_user: str = (
+        "创意输入：\n{premise}\n\n"
+        "宏观梗概：\n{synopsis}\n\n"
+        "已有完整设定集索引：\n{existing_index}\n\n"
+        "请生成需要新建或补充的完整设定集条目与跨类关系 JSON。"
+    )
+
+    volume_cast_system: str = (
+        "你是小说幕后设定策划。根据本卷大纲、已发生剧情、完整设定集与已揭示设定集索引，"
+        "扩充本卷出场设定：更新既有条目、新建必要条目、推进 volume_roles 与关系张力。"
+        "字段锁定的内容不可覆盖。\n"
+        "新建条目必须在本卷开始前的故事锚点已经真实存在；本卷中才会成立/出生/制造的存在"
+        "不得提前建档，必须改写为 type=timeline、exists_at_anchor=false 的成立事件。"
+        "reveal_strategy 只描述首次进入正文的钩子与呈现途径，不描述秘密揭底。\n"
+        "【输出格式】仅输出 JSON：\n"
+        '{"entries":[{"id":"...","type":"...","name":"...",'
+        '"surface_summary":"...","secret_truth":"...","narrative_role":"...",'
+        '"reveal_strategy":"首次登场方式","volume_roles":{"卷号":"本卷职责"},'
+        '"details":{},"exists_at_anchor":true,"existence_reason":"...",'
+        '"formation_event":null}],'
+        '"relationships":[{"id":"...","source_id":"...","target_id":"...",'
+        '"relationship_type":"...","conflict":"...","arc":{"current":"..."}}]}\n'
+        "不要输出额外文字。"
+    )
+
+    volume_cast_user: str = (
+        "本卷大纲：\n标题：{volume_title}\n弧线：\n{volume_arc}\n\n"
+        "本卷收束：\n{volume_ending}\n\n"
+        "已发生剧情：\n{story_context}\n\n"
+        "完整设定集摘要：\n{planning_brief}\n\n"
+        "已揭示设定集索引：\n{revealed_index}\n\n"
+        "请输出本卷设定扩充 JSON（entries + relationships）。"
     )
 
     entity_sync_system: str = (
         "你是一位小说幕后策划。根据已发生剧情与作者侧实体网络，维护一套只供规划使用的"
-        "实体与关系网。它允许记录尚未揭示的动机、秘密和未来弧线，绝不能把读者已知事实"
+        "实体与关系网。它允许记录尚未揭示的动机和秘密，绝不能把读者已知事实"
         "误当成全部真相。只提出有明确剧情依据或规划必要性的变更，避免为同一实体重复建档。\n"
+        "禁止为尚未实际成立的未来存在提前建档；它只能先作为 timeline 成立事件记录。"
+        "reveal_strategy 只表示该存在首次进入正文的方式。\n"
         "【输出格式】仅输出 JSON："
-        '{"entities":[{"id":"稳定 id","name":"名称","story_role":"...","surface_goal":"...",'
-        '"inner_need":"...","fear":"...","flaw":"...","arc":{"current":"..."}}],'
-        '"relationships":[{"id":"稳定关系 id","source_entity_id":"...","target_entity_id":"...",'
-        '"relationship_type":"...","status":"...","conflict":"...","arc":{"current":"..."}}]}。'
+        '{"entries":[{"id":"稳定 id","name":"名称","type":"character|worldbuilding|location|faction|item|timeline",'
+        '"narrative_role":"...","surface_summary":"...","secret_truth":"...",'
+        '"reveal_strategy":"首次登场方式","details":{},'
+        '"exists_at_anchor":true,"existence_reason":"为何此时已存在","formation_event":null}],'
+        '"relationships":[{"id":"稳定关系 id","source_id":"...","target_id":"...",'
+        '"relationship_type":"...","status":"...","conflict":"..."}]}。'
         "字段可省略表示不更新；不要输出任何额外文字。"
     )
     entity_sync_user: str = (
         "已有幕后实体网络：\n{entity_network}\n\n"
         "已发生剧情上下文：\n{story_context}\n\n"
         "请生成需要补充或更新的实体与关系变更 JSON。"
+    )
+
+    codex_detail_worldbuilding_system: str = (
+        "你是小说世界史与规则体系设计师。为一个已经真实存在的世界观设定撰写深层详情。"
+        "从最早成因、形成过程、历史阶段、运行规则、代价、边界、例外与社会影响展开；"
+        "所有因果必须与给定宏观梗概和关联设定一致。不要创造未来才存在的新实体，"
+        "不要把首次登场方式写成秘密揭底。详情应像真实世界的研究档案，信息密度高，"
+        "通常 800-1600 字，重要设定可更长。"
+    )
+    codex_detail_timeline_system: str = (
+        "你是小说编年史设计师。为一个已发生或作为剧情计划存在的时间线节点撰写深层详情。"
+        "交代远因、直接诱因、参与方、过程、结果、长期余波与史观分歧，并核对世界规则。"
+        "若 details.event_status=planned，它在故事锚点尚未发生：必须明确写“尚未发生”，"
+        "把过程、结果和余波写成预计方案、可能分支或成立条件，使用“将/可能/若”等条件语气；"
+        "严禁写“已完成/已满足”，严禁把某个未来结果当成既成历史。"
+        "planned 事件只能点名上下文中已经存在的角色或组织；未知参与者必须写成"
+        "“某位电工/一名技术员”等角色占位，不得为未来剧情擅自发明新姓名。"
+        "通常 700-1400 字。"
+    )
+    codex_detail_faction_system: str = (
+        "你是小说政治史与组织设计师。为一个当前已经存在的势力撰写深层详情。"
+        "覆盖成立背景、发展阶段、制度、资源、利益、内部派系、文化、外部关系、真实议程"
+        "与历史创伤；必须受世界观和相关时间线约束。通常 800-1600 字。"
+    )
+    codex_detail_location_system: str = (
+        "你是小说地理与地方史设计师。为一个当前已经存在的地点撰写深层详情。"
+        "覆盖自然/建造原因、发展历史、空间结构、生活质感、权力痕迹、关键事件、"
+        "相关势力与进入此地时可感知的细节；不得把未来才建成的地点写成当前存在。"
+        "通常 800-1600 字。"
+    )
+    codex_detail_character_system: str = (
+        "你是小说人物传记与心理动力设计师。为一个当前已经存在的角色撰写深层生平。"
+        "从出身、家庭与成长经历写起，说明关键经历如何塑造观点、欲望、恐惧、缺陷、能力、"
+        "职责、说话方式、行动习惯、关系模式、不可告人的秘密与深埋往事。"
+        "每个结构化角色字段都必须有传记证据支撑，避免空泛标签和人格清单。"
+        "details_patch 必须优先使用以下稳定英文键：inner_need、fear、flaw、values、"
+        "capabilities、limitations、voice、action_style、key_experiences。"
+        "通常 1000-2200 字，主角可更长。"
+    )
+    codex_detail_item_system: str = (
+        "你是小说器物史与物质文化设计师。为一个当前已经存在的重要物品撰写深层详情。"
+        "覆盖材料/制造来源、创造动机、流转历史、历任持有者、功能边界、使用代价、"
+        "损耗与象征意义，并与相关人物、地点、势力和世界规则一致。通常 600-1200 字。"
+    )
+    codex_detail_user: str = (
+        "{context}\n\n"
+        "【故事锚点硬边界】详情只能叙述截至故事开篇/当前锚点已经发生的历史。"
+        "未来计划可以标为“尚未发生的计划/成立条件”，但绝不能当作既成事实书写；"
+        "不得擅自创建或假定未来才成立的聚落、势力、人物、地点或物品。"
+        "禁止出现“未来走向”式代写剧情，也不要替角色完成尚未发生的选择。\n"
+        "【一致性硬规则】上下文中的专名、年龄、亲属、日期、数值与因果是硬约束。"
+        "缺少信息时保持概括，不要另造姓名或数字；输出前请在内部逐项核对相关设定，"
+        "尤其避免同一人物的父母姓名、年龄和事件日期互相冲突。\n"
+        "请只输出 JSON："
+        '{{"detail":"完整 Markdown 详情正文",'
+        '"details_patch":{{"按类型补齐的结构化字段":"值"}}}}。'
+        "detail 必须有清晰时间脉络和因果，不得只是扩写现有摘要；"
+        "details_patch 只放可稳定复用的结构化事实。"
+    )
+
+    world_expand_system: str = (
+        "你是小说世界知识图谱的扩展编辑。你的任务不是随意增加姓名，而是从一批已完成详情的"
+        "设定中，识别其中已经明确存在、且对剧情因果或世界真实性有重要作用、却尚未独立建档的"
+        "人物、地点、势力、物品、世界规则或时间节点。\n"
+        "【选择标准】\n"
+        "- 必须能引用输入详情中的明确证据；纯氛围路人、无职责成员、一次性装饰不得入选；\n"
+        "- 九人组织不等于九人都建档，只选择创始人、关键决策者、冲突轴人物；\n"
+        "- 候选必须解释现有因果、承担叙事职责或连接两个重要设定；\n"
+        "- 已有完整设定集中的同名、别名或同一存在不得重复创建；\n"
+        "- 未来才出生/成立/制造的存在不得建本体，只能输出 type=timeline、"
+        "exists_at_anchor=false 的成立事件；\n"
+        "- 每个候选至少关联一个 source_entry_id，并给出关系类型。\n"
+        "【输出】仅输出 JSON："
+        '{"candidates":[{"provisional_id":"稳定类型前缀_id","name":"名称",'
+        '"type":"character|worldbuilding|location|faction|item|timeline",'
+        '"source_entry_ids":["来源id"],"evidence":"详情中的证据",'
+        '"importance":"为何值得独立建档","relationship_type":"member_of|founded|controlled_by|created_by|caused_by|related",'
+        '"relatedness":0.0,"exists_at_anchor":true,"existence_reason":"",'
+        '"formation_event":null,"aliases":[],"tags":[],"surface_summary":"1-2句",'
+        '"secret_truth":"","narrative_role":"","reveal_strategy":"首次进入正文的方式",'
+        '"details":{}}]}。relatedness 为 0-1。不要输出额外文字。'
+    )
+    world_expand_user: str = (
+        "全书宏观梗概：\n{synopsis}\n\n"
+        "已有完整设定集索引（禁止重复）：\n{existing_index}\n\n"
+        "本批种子详情：\n{seed_context}\n\n"
+        "发散系数：{coefficient}；当前深度：{depth}/{max_depth}；"
+        "每个种子最多候选：{max_candidates_per_seed}；"
+        "全局剩余新条目预算：{remaining_budget}。\n"
+        "请克制挖掘，只输出真正值得成为独立节点的候选 JSON。"
     )
 
     volume_system: str = (
@@ -67,7 +232,7 @@ class Prompts:
         "【输出格式】仅输出一个 JSON 对象，字段为：\n"
         '  {"title": "卷标题", "arc": "本卷弧线叙述（约 400-600 字）",'
         ' "ending": "本卷收束与衔接下卷的钩子（必填，非空）",'
-        ' "chapter_count": 6, "entity_changes": {"entities": [], "relationships": []}}\n'
+        ' "chapter_count": 6}\n'
         "chapter_count 建议 4-12（整数）。不要输出任何额外文字或代码块标记。"
     )
 
@@ -83,7 +248,7 @@ class Prompts:
         "不得为同一实体另起新名或重复塑造；"
         "若提供了「未回收的情节线索」，请在本卷规划中明确推进或回收哪些线索，"
         "勿令其长期悬置或被遗忘；"
-        "按系统提示仅输出 JSON（含 title、arc、ending、chapter_count、entity_changes）。"
+        "按系统提示仅输出 JSON（含 title、arc、ending、chapter_count）。"
     )
 
     volume_chapters_system: str = (
@@ -153,10 +318,7 @@ class Prompts:
         '    {{"id": "b01", "goal": "...", "conflict": "...", "outcome": "...",'
         ' "entities": ["id", ...], "momentum": "..."}},\n'
         '    ...\n'
-        "  ],\n"
-        '  "entity_changes": {{"entities": [], "relationships": []}}\n'
-        "}}\n"
-        "entity_changes 仅记录本卷 beat 明确要求新建或推进的实体/关系；字段结构遵循前述幕后实体网络语义。\n"
+        "  ]}}\n"
         "id 从 b01 开始递增。不要输出任何额外文字或代码块标记。"
     )
 
@@ -169,7 +331,7 @@ class Prompts:
         "请为本卷生成 {min_beats}~{max_beats} 个连续叙事 beat。\n"
         "不要考虑章节划分，只关注叙事的连续流动与动量传递。\n"
         "严格遵循实体 id 复用规则，仅输出 "
-        '{{"beats": [...], "entity_changes": {{...}}}} JSON。'
+        '{{"beats": [...]}} JSON。'
     )
 
     beat_refine_system: str = (

@@ -158,6 +158,27 @@ export interface EntityArc {
   destination: string
 }
 
+export interface PlanningCodexEntry {
+  id: string
+  name: string
+  type: string
+  aliases: string[]
+  tags: string[]
+  relationship_refs: string[]
+  revealed_ref: string
+  surface_summary: string
+  secret_truth: string
+  narrative_role: string
+  reveal_strategy: string
+  detail: string
+  volume_roles: Record<string, string>
+  field_locks: string[]
+  source: string
+  updated_at: string
+  details: Record<string, unknown>
+  body: string
+}
+
 export interface PlanningEntity {
   id: string
   name: string
@@ -191,6 +212,8 @@ export interface RelationshipArc {
 
 export interface EntityRelationship {
   id: string
+  source_id?: string
+  target_id?: string
   source_entity_id: string
   target_entity_id: string
   relationship_type: string
@@ -209,13 +232,87 @@ export interface EntityRelationship {
 
 export interface EntityNetwork {
   version: number
+  entries?: PlanningCodexEntry[]
   entities: PlanningEntity[]
   relationships: EntityRelationship[]
   updated_at: string
 }
 
+export interface PlanningGraphNode {
+  id: string
+  name: string
+  type: string
+  summary: string
+  narrative_role: string
+  tags: string[]
+  planned: boolean
+  expansion_depth: number
+  expansion_run_id: string
+  degree: number
+}
+
+export interface PlanningGraphEdge {
+  id: string
+  source: string
+  target: string
+  relationship_type: string
+  kind: 'explicit' | 'implicit_world'
+  label: string
+  conflict?: string
+  stakes?: string
+  status?: string
+  tags?: string[]
+}
+
+export interface PlanningGraph {
+  nodes: PlanningGraphNode[]
+  edges: PlanningGraphEdge[]
+}
+
 export const getPlanningEntityNetwork = (projectId: string) =>
   http.get<EntityNetwork>(`/projects/${projectId}/planning-entities`).then(r => r.data)
+
+export const getPlanningGraph = (
+  projectId: string,
+  params?: {
+    types?: string[]
+    focus?: string
+    depth?: number
+    includeImplicitWorld?: boolean
+  },
+) => http.get<PlanningGraph>(`/projects/${projectId}/planning-entities/graph`, {
+  params: {
+    types: params?.types?.join(',') || '',
+    focus: params?.focus || undefined,
+    depth: params?.depth ?? 1,
+    include_implicit_world: params?.includeImplicitWorld ?? false,
+  },
+}).then(r => r.data)
+
+export interface PlanningGraphLayout {
+  nodes: Record<string, { x: number; y: number }>
+  viewport: Record<string, number>
+}
+
+export const getPlanningGraphLayout = (projectId: string) =>
+  http.get<PlanningGraphLayout>(`/projects/${projectId}/planning-entities/graph-layout`).then(r => r.data)
+
+export const savePlanningGraphLayout = (projectId: string, layout: PlanningGraphLayout) =>
+  http.put<{ ok: boolean }>(`/projects/${projectId}/planning-entities/graph-layout`, layout).then(r => r.data)
+
+export const listPlanningEntries = (projectId: string, type?: string) =>
+  http.get<PlanningCodexEntry[]>(`/projects/${projectId}/planning-entities/entries`, {
+    params: type ? { type } : undefined,
+  }).then(r => r.data)
+
+export const addPlanningEntry = (projectId: string, entry: PlanningCodexEntry) =>
+  http.post<PlanningCodexEntry>(`/projects/${projectId}/planning-entities/entries`, entry).then(r => r.data)
+
+export const updatePlanningEntry = (projectId: string, entry: PlanningCodexEntry) =>
+  http.put<PlanningCodexEntry>(`/projects/${projectId}/planning-entities/entries/${entry.id}`, entry).then(r => r.data)
+
+export const deletePlanningEntry = (projectId: string, entryId: string) =>
+  http.delete<{ ok: boolean }>(`/projects/${projectId}/planning-entities/entries/${entryId}`).then(r => r.data)
 
 export const addPlanningEntity = (projectId: string, entity: PlanningEntity) =>
   http.post<PlanningEntity>(`/projects/${projectId}/planning-entities/entities`, entity).then(r => r.data)
@@ -238,7 +335,7 @@ export const deleteEntityRelationship = (projectId: string, relationshipId: stri
 export const setPlanningEntityFieldLock = (
   projectId: string,
   itemId: string,
-  itemType: 'entity' | 'relationship',
+  itemType: 'entity' | 'entry' | 'relationship',
   fieldName: string,
   locked: boolean,
 ) => http.put<{ ok: boolean }>(`/projects/${projectId}/planning-entities/locks/${itemId}`, {
@@ -374,7 +471,72 @@ export interface PlanSSEHandle {
   close: () => void
 }
 
-/** Stream the full v2 volume planning pipeline (Step 1+2+3) via SSE. */
+export function generatePlanningEntryDetailSSE(
+  projectId: string,
+  entryId: string,
+  handlers: PlanSSEHandlers,
+): PlanSSEHandle {
+  return _planningDetailSSE(
+    `/api/projects/${projectId}/planning-entities/entries/${encodeURIComponent(entryId)}/detail`,
+    {},
+    handlers,
+  )
+}
+
+export function generateMissingPlanningDetailsSSE(
+  projectId: string,
+  handlers: PlanSSEHandlers,
+  onlyMissing = true,
+): PlanSSEHandle {
+  return _planningDetailSSE(
+    `/api/projects/${projectId}/planning-entities/details`,
+    { only_missing: onlyMissing },
+    handlers,
+  )
+}
+
+export function expandPlanningWorldSSE(
+  projectId: string,
+  coefficient: number,
+  handlers: PlanSSEHandlers,
+  seedIds: string[] = [],
+): PlanSSEHandle {
+  return _planningDetailSSE(
+    `/api/projects/${projectId}/planning-entities/expand`,
+    { coefficient, seed_ids: seedIds },
+    handlers,
+  )
+}
+
+function _planningDetailSSE(
+  url: string,
+  body: Record<string, unknown>,
+  handlers: PlanSSEHandlers,
+): PlanSSEHandle {
+  const ctrl = new AbortController()
+  ;(async () => {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify(body),
+        signal: ctrl.signal,
+        cache: 'no-store',
+      })
+      if (!res.ok || !res.body) {
+        handlers.onError?.(`连接失败（HTTP ${res.status}）`)
+        return
+      }
+      await _readSSEStream(res, handlers)
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return
+      handlers.onError?.(e?.message || '连接中断')
+    }
+  })()
+  return { close: () => ctrl.abort() }
+}
+
+/** Stream the full v2 volume planning pipeline (Step 1–4) via SSE. */
 export function planVolumeSSE(
   projectId: string,
   handlers: PlanSSEHandlers,
@@ -408,7 +570,43 @@ export function planVolumeSSE(
   return { close: () => ctrl.abort() }
 }
 
-/** Re-run Step 3 (refine + assemble) via SSE. */
+/** Two-step foundation: macro synopsis + full planning codex (SSE). */
+export function generateFoundationSSE(
+  projectId: string,
+  premise: string,
+  handlers: PlanSSEHandlers,
+  expansionCoefficient = 1,
+): PlanSSEHandle {
+  const ctrl = new AbortController()
+  const url = `/api/projects/${projectId}/outline/foundation`
+
+  ;(async () => {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify({
+          text: premise,
+          expansion_coefficient: expansionCoefficient,
+        }),
+        signal: ctrl.signal,
+        cache: 'no-store',
+      })
+      if (!res.ok || !res.body) {
+        handlers.onError?.(`连接失败（HTTP ${res.status}）`)
+        return
+      }
+      await _readSSEStream(res, handlers)
+    } catch (e: any) {
+      if (e?.name === 'AbortError') return
+      handlers.onError?.(e?.message || '连接中断')
+    }
+  })()
+
+  return { close: () => ctrl.abort() }
+}
+
+/** Re-run Step 4 (refine + assemble) via SSE. */
 export function assembleVolumeSSE(
   projectId: string,
   volumeNumber: number,

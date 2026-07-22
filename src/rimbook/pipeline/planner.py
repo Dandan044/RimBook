@@ -27,7 +27,14 @@ from ..outline import (
     ChapterOutline, OutlineStore, SceneBeat, VolumeOutline,
     RawBeat, RefinedBeat, ChapterAssignment, VolumeBeatData, MicroScene,
 )
-from ..planning_entities import EntityNetworkChanges, EntityNetworkService
+from ..planning_entities import (
+    DETAIL_TYPE_ORDER,
+    ExpansionBudget,
+    ExpansionCandidate,
+    PlanningCodexChanges,
+    PlanningCodexService,
+    WorldExpander,
+)
 
 __all__ = ["Planner", "ChapterPlanResult", "VolumePlanResult"]
 
@@ -61,10 +68,13 @@ class Planner:
         outline: OutlineStore,
         codex: CodexStore | None = None,
         *,
-        planning_entities: EntityNetworkService | None = None,
+        planning_entities: PlanningCodexService | None = None,
         threads: ThreadStore | None = None,
         trace: TraceStore | None = None,
         project_name: str = "",
+        expansion_hard_max_calls: int = 80,
+        expansion_hard_max_entries: int = 120,
+        expansion_hard_max_relationships: int = 360,
     ) -> None:
         self.llm = llm
         self.prompts = prompts
@@ -74,15 +84,20 @@ class Planner:
         self.threads = threads
         self.trace = trace if trace is not None else NULL_TRACE
         self.project_name = project_name
+        self.expansion_hard_max_calls = expansion_hard_max_calls
+        self.expansion_hard_max_entries = expansion_hard_max_entries
+        self.expansion_hard_max_relationships = expansion_hard_max_relationships
 
     # ------------------------------------------------------------------
     # Synopsis
     # ------------------------------------------------------------------
     def plan_synopsis(self, premise: str, *, persist: bool = True) -> str:
-        """Generate the whole-novel synopsis from a short premise."""
+        """Generate the macro whole-novel synopsis from a short premise."""
         messages = self.llm.as_chat(
-            system=self.prompts.synopsis_system,
-            user=self.prompts.synopsis_user.format(premise=premise),
+            system=self.prompts.foundation_synopsis_system or self.prompts.synopsis_system,
+            user=(self.prompts.foundation_synopsis_user or self.prompts.synopsis_user).format(
+                premise=premise
+            ),
         )
         with self.trace.begin("synopsis", project=self.project_name) as t:
             result = self.llm.generate(messages, temperature=0.8)
@@ -91,6 +106,526 @@ class Planner:
         if persist:
             self.outline.write_synopsis(text)
         return text
+
+    def plan_foundation(
+        self,
+        premise: str,
+        *,
+        persist: bool = True,
+        expansion_coefficient: int = 1,
+    ) -> Generator[dict, None, None]:
+        """Project foundation: macro synopsis, rough codex, then layered details."""
+        yield {"event": "step", "data": {
+            "step": 1, "status": "running",
+            "message": "正在生成宏观全书梗概…",
+        }}
+        synopsis = self.plan_synopsis(premise, persist=persist)
+        yield {"event": "step", "data": {
+            "step": 1, "status": "done",
+            "message": "宏观梗概已生成",
+            "synopsis_length": len(synopsis),
+        }}
+
+        cast_result: dict[str, object] = {}
+        if self.planning_entities is not None:
+            yield {"event": "step", "data": {
+                "step": 2, "status": "running",
+                "message": "正在初始化完整设定集…",
+            }}
+            existing_index = self.planning_entities.render_index()
+            messages = self.llm.as_chat(
+                system=self.prompts.foundation_codex_system,
+                user=self.prompts.foundation_codex_user.format(
+                    premise=premise,
+                    synopsis=synopsis,
+                    existing_index=existing_index,
+                ),
+            )
+            with self.trace.begin("foundation_codex", project=self.project_name) as t:
+                data: dict = {}
+                last_error: ValueError | None = None
+                for attempt in range(1, 3):
+                    try:
+                        data = self.llm.generate_json(
+                            messages,
+                            temperature=0.45 if attempt == 1 else 0.3,
+                            max_tokens=12000,
+                        )
+                        t.record(messages, data, model=self.llm.default_model)
+                        last_error = None
+                        break
+                    except ValueError as exc:
+                        last_error = exc
+                        t.record(
+                            messages,
+                            None,
+                            model=self.llm.default_model,
+                            warnings=[f"第 {attempt} 次 JSON 解析失败: {exc}"],
+                        )
+                if last_error is not None:
+                    raise last_error
+            raw_entries = data.get("entries") if isinstance(data, dict) else []
+            if not isinstance(raw_entries, list):
+                raw_entries = []
+            reconcile = self.planning_entities.apply_foundation_entries(
+                raw_entries, source="foundation", require_existence=True,
+            )
+            rel_changes = PlanningCodexChanges.from_payload(data)
+            if rel_changes.relationships:
+                rel_result = self.planning_entities.reconcile(
+                    PlanningCodexChanges(relationships=rel_changes.relationships),
+                    source="foundation",
+                )
+                reconcile.created_relationships.extend(rel_result.created_relationships)
+                reconcile.updated_relationships.extend(rel_result.updated_relationships)
+                reconcile.skipped_relationships.extend(rel_result.skipped_relationships)
+            cast_result = reconcile.model_dump()
+            yield {"event": "step", "data": {
+                "step": 2, "status": "done",
+                "message": (
+                    f"完整设定集已初始化（{reconcile.change_count} 项变更，"
+                    f"{len(reconcile.warnings)} 条警告）"
+                ),
+                "changes": cast_result,
+                "entry_count": len(self.planning_entities.store.list_entries()),
+                "relationship_count": len(self.planning_entities.store.list_relationships()),
+            }}
+            yield from self.generate_codex_details(
+                synopsis=synopsis,
+                only_missing=True,
+                step_offset=3,
+            )
+            if expansion_coefficient > 1:
+                yield from self.expand_world(
+                    coefficient=expansion_coefficient,
+                    synopsis=synopsis,
+                    step_offset=9,
+                )
+        else:
+            yield {"event": "step", "data": {
+                "step": 2, "status": "done",
+                "message": "未启用完整设定集服务，跳过设定初始化",
+            }}
+
+    def generate_codex_details(
+        self,
+        *,
+        synopsis: str | None = None,
+        entry_ids: list[str] | None = None,
+        only_missing: bool = True,
+        step_offset: int = 1,
+    ) -> Generator[dict, None, None]:
+        """Generate long-form details in macro-to-micro type order.
+
+        Each entry is persisted immediately. A malformed or low-quality result
+        is isolated as a warning so later entries can still complete.
+        """
+        if self.planning_entities is None:
+            return
+        synopsis_text = synopsis
+        if synopsis_text is None:
+            synopsis_text = self.outline.read_synopsis().strip()
+        wanted = set(entry_ids or [])
+
+        for index, entry_type in enumerate(DETAIL_TYPE_ORDER):
+            step = step_offset + index
+            entries = self.planning_entities.store.list_entries(entry_type)
+            if wanted:
+                entries = [entry for entry in entries if entry.id in wanted]
+            if only_missing:
+                entries = [entry for entry in entries if not entry.detail.strip()]
+
+            yield {"event": "step", "data": {
+                "step": step,
+                "status": "running",
+                "phase": "codex_detail",
+                "entry_type": entry_type,
+                "total": len(entries),
+                "message": f"正在细化{_planning_type_label(entry_type)}详情…",
+            }}
+
+            completed = 0
+            warnings: list[str] = []
+            for position, entry in enumerate(entries, start=1):
+                yield {"event": "progress", "data": {
+                    "step": step,
+                    "entry_type": entry_type,
+                    "entry_id": entry.id,
+                    "current": position,
+                    "total": len(entries),
+                    "message": (
+                        f"正在细化{_planning_type_label(entry_type)}"
+                        f"「{entry.name}」（{position}/{len(entries)}）…"
+                    ),
+                }}
+                try:
+                    self.generate_entry_detail(entry.id, synopsis=synopsis_text)
+                    completed += 1
+                except (ValueError, FileNotFoundError) as exc:
+                    warnings.append(f"{entry.id}: {exc}")
+
+            yield {"event": "step", "data": {
+                "step": step,
+                "status": "done",
+                "phase": "codex_detail",
+                "entry_type": entry_type,
+                "completed": completed,
+                "skipped": len(entries) - completed,
+                "warnings": warnings,
+                "message": (
+                    f"{_planning_type_label(entry_type)}详情完成"
+                    f"（{completed}/{len(entries)}）"
+                ),
+            }}
+
+    def generate_entry_detail(
+        self,
+        entry_id: str,
+        *,
+        synopsis: str | None = None,
+    ) -> dict[str, object]:
+        """Generate and persist one entry's long-form detail."""
+        if self.planning_entities is None:
+            raise RuntimeError("未启用完整设定集服务")
+        entry = self.planning_entities.store.get_entry(entry_id)
+        synopsis_text = synopsis
+        if synopsis_text is None:
+            synopsis_text = self.outline.read_synopsis().strip()
+        context = self.planning_entities.render_detail_context(
+            entry_id,
+            synopsis=synopsis_text,
+        )
+        system_prompt = getattr(
+            self.prompts,
+            f"codex_detail_{entry.type}_system",
+        )
+        correction = ""
+        data: dict = {}
+        detail = ""
+        details_patch: dict = {}
+        issues: list[str] = []
+        for attempt in range(1, 3):
+            user_prompt = self.prompts.codex_detail_user.format(context=context)
+            if correction:
+                user_prompt += (
+                    "\n\n【上次输出未通过质量门禁，必须修正】\n"
+                    + correction
+                    + "\n请重新输出完整 JSON。"
+                )
+            messages = self.llm.as_chat(
+                system=system_prompt,
+                user=user_prompt,
+            )
+            with self.trace.begin(
+                "planning_codex_detail",
+                project=self.project_name,
+                entry_id=entry_id,
+                entry_type=entry.type,
+                attempt=attempt,
+            ) as trace:
+                data = self.llm.generate_json(
+                    messages,
+                    temperature=0.5,
+                    max_tokens=6000,
+                )
+                trace.record(messages, data, model=self.llm.default_model)
+
+            detail = str(data.get("detail") or "").strip()
+            raw_patch = data.get("details_patch") or {}
+            if not isinstance(raw_patch, dict):
+                issues = ["details_patch 必须是对象"]
+                details_patch = {}
+            else:
+                details_patch = raw_patch
+                issues = self.planning_entities.detail_quality_issues(
+                    entry_id,
+                    detail,
+                )
+            if not issues:
+                break
+            correction = "\n".join(f"- {issue}" for issue in issues)
+        if issues:
+            raise ValueError("；".join(issues) + "，重试后仍未通过，未写入")
+
+        result = self.planning_entities.apply_detail(
+            entry_id,
+            detail=detail,
+            details_patch=details_patch,
+        )
+        return {
+            "entry_id": entry_id,
+            "entry_type": entry.type,
+            "detail_length": len(detail),
+            "details_keys": sorted(details_patch),
+            "changes": result.model_dump(),
+        }
+
+    def expand_world(
+        self,
+        *,
+        coefficient: int,
+        synopsis: str | None = None,
+        seed_ids: list[str] | None = None,
+        step_offset: int = 1,
+    ) -> Generator[dict, None, None]:
+        """Expand completed details into a budgeted, relational world graph."""
+        if self.planning_entities is None:
+            return
+        budget = ExpansionBudget.for_coefficient(coefficient)
+        if budget.max_depth == 0:
+            return
+        budget.max_llm_calls = min(
+            budget.max_llm_calls,
+            self.expansion_hard_max_calls,
+        )
+        synopsis_text = synopsis
+        if synopsis_text is None:
+            synopsis_text = self.outline.read_synopsis().strip()
+        initial_seeds = [
+            entry.id
+            for entry in self.planning_entities.store.list_entries()
+            if entry.detail.strip()
+        ]
+        if seed_ids:
+            wanted = set(seed_ids)
+            initial_seeds = [entry_id for entry_id in initial_seeds if entry_id in wanted]
+        expander = WorldExpander(self.planning_entities)
+        state = expander.start_or_resume(
+            coefficient=coefficient,
+            seed_ids=initial_seeds,
+        )
+        current_seeds = list(state.seed_ids)
+
+        for depth in range(state.current_depth, budget.max_depth + 1):
+            step = step_offset + depth - 1
+            seeds = [
+                entry_id
+                for entry_id in current_seeds
+                if entry_id not in set(state.processed_seed_ids)
+            ]
+            if not seeds:
+                state.complete = True
+                state.stopped_reason = "没有未处理的扩展种子"
+                expander.save_state(state)
+                break
+            yield {"event": "step", "data": {
+                "step": step,
+                "status": "running",
+                "phase": "world_expand",
+                "depth": depth,
+                "max_depth": budget.max_depth,
+                "coefficient": coefficient,
+                "seed_count": len(seeds),
+                "created": len(state.created_entry_ids),
+                "remaining_budget": max(
+                    budget.max_new_per_run - len(state.created_entry_ids),
+                    0,
+                ),
+                "message": (
+                    f"正在扩展真实世界（第 {depth}/{budget.max_depth} 层，"
+                    f"{len(seeds)} 个种子）…"
+                ),
+            }}
+
+            mined: list[ExpansionCandidate] = []
+            warnings: list[str] = []
+            for batch_start in range(0, len(seeds), 6):
+                if state.llm_calls_used >= budget.max_llm_calls:
+                    warnings.append("达到 LLM 调用硬上限")
+                    break
+                batch_ids = seeds[batch_start: batch_start + 6]
+                yield {"event": "progress", "data": {
+                    "phase": "world_expand",
+                    "depth": depth,
+                    "message": (
+                        f"正在从第 {batch_start + 1}–"
+                        f"{min(batch_start + len(batch_ids), len(seeds))} 个种子挖掘关键存在…"
+                    ),
+                }}
+                seed_context = self._format_expansion_seed_context(batch_ids)
+                messages = self.llm.as_chat(
+                    system=self.prompts.world_expand_system,
+                    user=self.prompts.world_expand_user.format(
+                        synopsis=synopsis_text,
+                        existing_index=self.planning_entities.render_index(
+                            max_per_type=80
+                        ),
+                        seed_context=seed_context,
+                        coefficient=coefficient,
+                        depth=depth,
+                        max_depth=budget.max_depth,
+                        max_candidates_per_seed=budget.max_candidates_per_seed,
+                        remaining_budget=max(
+                            budget.max_new_per_run - len(state.created_entry_ids),
+                            0,
+                        ),
+                    ),
+                )
+                with self.trace.begin(
+                    "world_expand_mine",
+                    project=self.project_name,
+                    depth=depth,
+                    seed_ids=batch_ids,
+                    run_id=state.run_id,
+                ) as trace:
+                    try:
+                        data = self.llm.generate_json(
+                            messages,
+                            temperature=0.45,
+                            max_tokens=12000,
+                        )
+                        trace.record(messages, data, model=self.llm.default_model)
+                    except ValueError as exc:
+                        trace.record(
+                            messages,
+                            None,
+                            model=self.llm.default_model,
+                            warnings=[str(exc)],
+                        )
+                        warnings.append(f"候选挖掘失败: {exc}")
+                        state.llm_calls_used += 1
+                        expander.save_state(state)
+                        continue
+                state.llm_calls_used += 1
+                expander.save_state(state)
+                for raw_candidate in data.get("candidates") or []:
+                    if not isinstance(raw_candidate, dict):
+                        continue
+                    try:
+                        candidate = ExpansionCandidate.model_validate(raw_candidate)
+                    except Exception as exc:  # noqa: BLE001
+                        warnings.append(f"跳过无效候选: {exc}")
+                        continue
+                    candidate.source_entry_ids = [
+                        entry_id
+                        for entry_id in candidate.source_entry_ids
+                        if entry_id in batch_ids
+                    ]
+                    if not candidate.source_entry_ids:
+                        warnings.append(f"候选 {candidate.name} 缺少有效来源")
+                        continue
+                    mined.append(candidate)
+
+            deduped, dedup_warnings = expander.deduplicate(mined)
+            warnings.extend(dedup_warnings)
+            selected = expander.select(deduped, budget=budget, state=state)
+            if (
+                len(self.planning_entities.store.list_entries())
+                >= self.expansion_hard_max_entries
+            ):
+                selected = [
+                    candidate for candidate in selected if candidate.existing_match_id
+                ]
+                warnings.append("达到完整设定集条目硬上限")
+            if (
+                len(self.planning_entities.store.list_relationships())
+                >= self.expansion_hard_max_relationships
+            ):
+                selected = []
+                warnings.append("达到关系数量硬上限")
+
+            created_ids, materialize_result = expander.materialize(
+                selected,
+                depth=depth,
+                state=state,
+            )
+            warnings.extend(materialize_result.warnings)
+            completed_details: list[str] = []
+            for entry_type in DETAIL_TYPE_ORDER:
+                type_ids = [
+                    entry_id
+                    for entry_id in created_ids
+                    if self.planning_entities.store.get_entry(entry_id).type == entry_type
+                ]
+                for position, entry_id in enumerate(type_ids, start=1):
+                    if state.llm_calls_used >= budget.max_llm_calls:
+                        warnings.append("详情生成前达到 LLM 调用硬上限")
+                        break
+                    entry = self.planning_entities.store.get_entry(entry_id)
+                    yield {"event": "progress", "data": {
+                        "phase": "world_expand_detail",
+                        "depth": depth,
+                        "entry_id": entry_id,
+                        "entry_type": entry_type,
+                        "message": (
+                            f"正在细化扩展条目「{entry.name}」"
+                            f"（{position}/{len(type_ids)}）…"
+                        ),
+                    }}
+                    try:
+                        self.generate_entry_detail(entry_id, synopsis=synopsis_text)
+                        completed_details.append(entry_id)
+                    except ValueError as exc:
+                        warnings.append(f"{entry_id} 详情失败: {exc}")
+                    state.llm_calls_used += 1
+                    expander.save_state(state)
+
+            state.processed_seed_ids.extend(
+                entry_id
+                for entry_id in seeds
+                if entry_id not in state.processed_seed_ids
+            )
+            state.current_depth = depth + 1
+            current_seeds = completed_details
+            state.seed_ids = list(current_seeds)
+            if not created_ids:
+                state.complete = True
+                state.stopped_reason = "本层没有值得物化的新条目"
+            elif depth >= budget.max_depth:
+                state.complete = True
+                state.stopped_reason = "达到最大扩展深度"
+            elif len(state.created_entry_ids) >= budget.max_new_per_run:
+                state.complete = True
+                state.stopped_reason = "达到新条目预算"
+            elif state.llm_calls_used >= budget.max_llm_calls:
+                state.complete = True
+                state.stopped_reason = "达到 LLM 调用预算"
+            expander.save_state(state)
+
+            yield {"event": "step", "data": {
+                "step": step,
+                "status": "done",
+                "phase": "world_expand",
+                "depth": depth,
+                "mined": len(mined),
+                "accepted": len(selected),
+                "created_entry_ids": created_ids,
+                "completed_detail_ids": completed_details,
+                "deduplicated": len(mined) - len(deduped),
+                "remaining_budget": max(
+                    budget.max_new_per_run - len(state.created_entry_ids),
+                    0,
+                ),
+                "llm_calls_used": state.llm_calls_used,
+                "warnings": warnings,
+                "message": (
+                    f"世界扩展第 {depth} 层完成："
+                    f"挖掘 {len(mined)}，新建 {len(created_ids)}"
+                ),
+            }}
+            if state.complete:
+                break
+
+    def _format_expansion_seed_context(self, seed_ids: list[str]) -> str:
+        if self.planning_entities is None:
+            return "（无）"
+        blocks: list[str] = []
+        relations = self.planning_entities.store.list_relationships()
+        for seed_id in seed_ids:
+            entry = self.planning_entities.store.get_entry(seed_id)
+            relation_lines = [
+                f"{relation.source_id}->{relation.target_id}"
+                f"({relation.relationship_type})"
+                for relation in relations
+                if relation.source_id == seed_id or relation.target_id == seed_id
+            ][:12]
+            blocks.append(
+                f"### [{entry.type}] {entry.id} · {entry.name}\n"
+                f"叙事职责：{entry.narrative_role or '待定'}\n"
+                f"现有关系：{'；'.join(relation_lines) or '无'}\n"
+                f"详情：\n{entry.detail[:5000]}"
+            )
+        return "\n\n".join(blocks)
 
     # ------------------------------------------------------------------
     # Volumes
@@ -210,13 +745,12 @@ class Planner:
     def plan_volume_v2(
         self, number: int, *, title: str = ""
     ) -> Generator[dict, None, None]:
-        """Three-step volume planning pipeline (yields SSE event dicts).
+        """Four-step volume planning pipeline (yields SSE event dicts).
 
-        Step 1: Volume structure (same as plan_volume Turn 1).
-        Step 2: Generate a continuous beat chain (not grouped by chapter).
-        Step 3: Refine beats + assemble into chapters.
-
-        Yields dicts like {"event": "step", "data": {...}} for SSE streaming.
+        Step 1: Volume structure.
+        Step 2: Volume cast / planning codex expansion.
+        Step 3: Continuous beat chain.
+        Step 4: Refine beats + assemble into chapters.
         """
         if self.outline.read_volume(number) is not None:
             raise FileExistsError(f"第 {number} 卷已存在，禁止重复规划")
@@ -227,26 +761,6 @@ class Planner:
         prev = self.outline.list_chapters()
         prev_recap = _format_prev_chapters(prev[-8:]) if prev else ""
         max_chapter = max((c.number for c in prev), default=0)
-
-        # === Step 0: Reconcile the existing story into author-side entities ===
-        if self.planning_entities is not None:
-            yield {"event": "step", "data": {
-                "step": 0, "status": "running",
-                "message": "正在根据已有剧情同步幕后实体与关系网…",
-            }}
-            story_context = (
-                f"全书梗概：\n{synopsis}\n\n"
-                f"既有卷：\n{existing_desc or '（无）'}\n\n"
-                f"近八章剧情：\n{prev_recap or '（尚无章节）'}"
-            )
-            sync_result = self._sync_planning_entities(
-                story_context=story_context, source="story_backfill", volume=number,
-            )
-            yield {"event": "step", "data": {
-                "step": 0, "status": "done",
-                "message": f"幕后实体同步完成（{sync_result.get('change_count', 0)} 项变更）",
-                "changes": sync_result,
-            }}
 
         # === Step 1: Volume structure ===
         yield {"event": "step", "data": {"step": 1, "status": "running", "message": "正在生成卷大纲与结局…"}}
@@ -283,25 +797,71 @@ class Planner:
 
         vol = VolumeOutline(number=number, title=vol_title, arc=arc, ending=ending, chapters=[], recap="")
         self.outline.write_volume(vol)
-        volume_entity_changes = self._apply_planning_entity_changes(
-            vol_data, source="volume_outline"
-        )
-        # Step 2 must see any cast introduced by the volume outline rather
-        # than inventing a motive-less id and patching it in afterwards.
-        entity_registry = self._format_entity_registry()
-        entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
 
         yield {"event": "step", "data": {
             "step": 1, "status": "done",
             "message": "卷大纲已生成",
             "volume": {"number": number, "title": vol_title, "arc": arc, "ending": ending, "chapter_count": chapter_count},
-            "entity_changes": volume_entity_changes,
         }}
 
-        # === Step 2: Continuous beat chain ===
+        # === Step 2: Volume cast / planning codex expansion ===
+        cast_changes: dict[str, object] = {}
+        if self.planning_entities is not None:
+            yield {"event": "step", "data": {
+                "step": 2, "status": "running",
+                "message": "正在扩充本卷出场设定…",
+            }}
+            story_context = (
+                f"全书梗概：\n{synopsis}\n\n"
+                f"既有卷：\n{existing_desc or '（无）'}\n\n"
+                f"近八章剧情：\n{prev_recap or '（尚无章节）'}"
+            )
+            cast_messages = self.llm.as_chat(
+                system=self.prompts.volume_cast_system,
+                user=self.prompts.volume_cast_user.format(
+                    volume_title=vol_title,
+                    volume_arc=arc,
+                    volume_ending=ending,
+                    story_context=story_context,
+                    planning_brief=self._format_planning_entity_brief(volume=number),
+                    revealed_index=self._format_revealed_codex_index(),
+                ),
+            )
+            with self.trace.begin("volume_cast", project=self.project_name, volume=number) as t:
+                cast_data = self.llm.generate_json(cast_messages, temperature=0.4)
+                t.record(cast_messages, cast_data, model=self.llm.default_model)
+            raw_entries = cast_data.get("entries") if isinstance(cast_data, dict) else []
+            if not isinstance(raw_entries, list):
+                raw_entries = []
+            cast_result = self.planning_entities.apply_foundation_entries(
+                raw_entries, source="volume_cast", require_existence=True,
+            )
+            rel_changes = PlanningCodexChanges.from_payload(cast_data)
+            if rel_changes.relationships:
+                rel_result = self.planning_entities.reconcile(
+                    PlanningCodexChanges(relationships=rel_changes.relationships),
+                    source="volume_cast",
+                )
+                cast_result.created_relationships.extend(rel_result.created_relationships)
+                cast_result.updated_relationships.extend(rel_result.updated_relationships)
+            cast_changes = cast_result.model_dump()
+            entity_registry = self._format_entity_registry()
+            entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
+            yield {"event": "step", "data": {
+                "step": 2, "status": "done",
+                "message": f"本卷设定扩充完成（{cast_result.change_count} 项变更）",
+                "changes": cast_changes,
+            }}
+        else:
+            yield {"event": "step", "data": {
+                "step": 2, "status": "done",
+                "message": "未启用完整设定集，跳过本卷设定扩充",
+            }}
+
+        # === Step 3: Continuous beat chain ===
         min_beats = max(chapter_count * 3, 12)
         max_beats = chapter_count * 6
-        yield {"event": "step", "data": {"step": 2, "status": "running", "message": f"正在生成连续 beat 链（{min_beats}~{max_beats} 个）…"}}
+        yield {"event": "step", "data": {"step": 3, "status": "running", "message": f"正在生成连续 beat 链（{min_beats}~{max_beats} 个）…"}}
 
         history = [
             {"role": "user", "content": turn1_user},
@@ -324,29 +884,28 @@ class Planner:
             beats_data = self.llm.generate_json(messages2, temperature=0.7)
             t.record(messages2, beats_data, model=self.llm.default_model)
 
-        raw_beats = _parse_raw_beats(
+        raw_beats, beat_warnings = _parse_raw_beats(
             beats_data,
-            codex=None if self.planning_entities is not None else self.codex,
+            planning=self.planning_entities,
+            codex=self.codex,
         )
+        warnings.extend(beat_warnings)
         if len(raw_beats) < min_beats:
             warnings.append(f"beat 数量 {len(raw_beats)} 低于建议下限 {min_beats}")
-        beat_entity_changes = self._apply_planning_entity_changes(
-            beats_data, source="volume_beats"
-        )
+        # Non-blocking legacy compat: optional entity_changes in beat output
+        self._apply_planning_entity_changes(beats_data, source="volume_beats")
 
-        # Persist beats (step=2)
-        beat_data = VolumeBeatData(volume=number, step=2, raw_beats=raw_beats)
+        beat_data = VolumeBeatData(volume=number, step=3, raw_beats=raw_beats)
         self.outline.save_volume_beats(beat_data)
 
         yield {"event": "step", "data": {
-            "step": 2, "status": "done",
+            "step": 3, "status": "done",
             "message": f"已生成 {len(raw_beats)} 个 beat",
             "beats": [b.model_dump() for b in raw_beats],
-            "entity_changes": beat_entity_changes,
         }}
 
-        # === Step 3: Refine + Assemble ===
-        yield from self._step3_refine_and_assemble(
+        # === Step 4: Refine + Assemble ===
+        yield from self._step4_refine_and_assemble(
             number=number,
             vol_title=vol_title,
             arc=arc,
@@ -359,10 +918,10 @@ class Planner:
     def assemble_from_beats(
         self, volume_number: int, beats: list[RawBeat] | None = None
     ) -> Generator[dict, None, None]:
-        """Re-run Step 3 (refine + assemble) using current or provided beats.
+        """Re-run Step 4 (refine + assemble) using current or provided beats.
 
         If *beats* is None, loads raw_beats from the persisted beats file.
-        Yields SSE event dicts for Step 3 only.
+        Yields SSE event dicts for Step 4 only.
         """
         vol = self.outline.read_volume(volume_number)
         if vol is None:
@@ -387,7 +946,7 @@ class Planner:
             start_number = min(c.number for c in existing_vol_chapters)
             chapter_count = len(existing_vol_chapters)
 
-        yield from self._step3_refine_and_assemble(
+        yield from self._step4_refine_and_assemble(
             number=volume_number,
             vol_title=vol.title,
             arc=vol.arc,
@@ -397,7 +956,7 @@ class Planner:
             start_chapter_number=start_number,
         )
 
-    def _step3_refine_and_assemble(
+    def _step4_refine_and_assemble(
         self,
         *,
         number: int,
@@ -408,10 +967,9 @@ class Planner:
         raw_beats: list[RawBeat],
         start_chapter_number: int,
     ) -> Generator[dict, None, None]:
-        """Step 3a: group + keynote; Step 3b: per-chapter MicroScenes; persist."""
-        # --- 3a: Assemble into chapters + keynote ---
+        """Step 4a: group + keynote; Step 4b: per-chapter MicroScenes; persist."""
         yield {"event": "step", "data": {
-            "step": 3, "status": "running", "phase": "grouping",
+            "step": 4, "status": "running", "phase": "grouping",
             "message": f"正在将 {len(raw_beats)} 个 beat 分组为 {chapter_count} 章并写章基调…",
         }}
 
@@ -443,11 +1001,11 @@ class Planner:
         chapter_map, beat_pool = _parse_assemble_from_raw(assemble_data, raw_beats)
 
         yield {"event": "step", "data": {
-            "step": 3, "status": "running", "phase": "refining",
+            "step": 4, "status": "running", "phase": "refining",
             "message": f"正在为 {len(chapter_map)} 章生成细场景…",
         }}
 
-        # --- 3b: Per-chapter micro-scenes ---
+        # --- 4b: Per-chapter micro-scenes ---
         chapters: list[ChapterOutline] = []
         for i, ca in enumerate(chapter_map):
             ch_number = start_chapter_number + i
@@ -485,9 +1043,8 @@ class Planner:
                 elapsed=ca.elapsed,
             ))
 
-        # Persist beats file (step=3) — chapter_map holds keynote; no dual MicroScene store
         beat_data = VolumeBeatData(
-            volume=number, step=3,
+            volume=number, step=4,
             raw_beats=raw_beats,
             refined_beats=[],
             chapter_map=chapter_map,
@@ -499,7 +1056,7 @@ class Planner:
         self.outline.sync_volume_chapters(number)
 
         yield {"event": "step", "data": {
-            "step": 3, "status": "done",
+            "step": 4, "status": "done",
             "message": f"已组装 {len(chapters)} 章（含基调与细场景）",
             "chapters": [
                 {
@@ -684,7 +1241,8 @@ class Planner:
             result,
             volume=volume,
             title=title,
-            codex=None if self.planning_entities is not None else self.codex,
+            codex=self.codex,
+            planning=self.planning_entities,
         )
         self._apply_planning_entity_changes(result, source="chapter_plan")
 
@@ -695,12 +1253,18 @@ class Planner:
         # Collect diagnostics about new vs reused ids.
         resolved_ids: list[str] = []
         new_ids: list[str] = []
-        if self.codex is not None and self.planning_entities is None:
+        if self.codex is not None:
             all_ids = chapter.all_entities()
-            resolved_ids, log = resolve_entity_ids(all_ids, self.codex)
-            for r in log:
-                if r.is_new:
-                    new_ids.append(r.canonical_id)
+            if self.planning_entities is not None:
+                resolved_ids, id_warnings = self.planning_entities.resolve_entry_ids(
+                    all_ids, codex=self.codex,
+                )
+                warnings.extend(id_warnings)
+            else:
+                resolved_ids, log = resolve_entity_ids(all_ids, self.codex)
+                for r in log:
+                    if r.is_new:
+                        new_ids.append(r.canonical_id)
 
         if persist:
             self.outline.write_chapter(chapter)
@@ -748,7 +1312,7 @@ class Planner:
         """Ask the author-side entity service to reconcile existing story facts.
 
         This is intentionally separate from Codex enrichment: its output is
-        author-only and may contain motivations or unrevealed future arcs.
+        author-only and may contain motivations or unrevealed truths.
         """
         if self.planning_entities is None:
             return {}
@@ -768,8 +1332,24 @@ class Planner:
         ) as trace:
             data = self.llm.generate_json(messages, temperature=0.4)
             trace.record(messages, data, model=self.llm.default_model)
-        changes = EntityNetworkChanges.from_payload(data)
-        return self.planning_entities.reconcile(changes, source=source).model_dump()
+        raw_entries = data.get("entries") if isinstance(data, dict) else []
+        if not isinstance(raw_entries, list):
+            raw_entries = []
+        result = self.planning_entities.apply_foundation_entries(
+            raw_entries,
+            source=source,
+            require_existence=True,
+        )
+        changes = PlanningCodexChanges.from_payload(data)
+        if changes.relationships:
+            relation_result = self.planning_entities.reconcile(
+                PlanningCodexChanges(relationships=changes.relationships),
+                source=source,
+            )
+            result.created_relationships.extend(relation_result.created_relationships)
+            result.updated_relationships.extend(relation_result.updated_relationships)
+            result.skipped_relationships.extend(relation_result.skipped_relationships)
+        return result.model_dump()
 
     def _apply_planning_entity_changes(
         self, data: dict, *, source: str
@@ -777,7 +1357,23 @@ class Planner:
         """Apply optional entity changes embedded in a volume or chapter plan."""
         if self.planning_entities is None:
             return {}
-        changes = EntityNetworkChanges.from_payload(data.get("entity_changes"))
+        changes = PlanningCodexChanges.from_payload(data.get("entity_changes"))
+        # Legacy embedded changes may update known entries, but may not create
+        # new existences because they carry no story-anchor evidence.
+        known_ids = {
+            entry.id for entry in self.planning_entities.store.list_entries()
+        }
+        changes.entries = [
+            proposal for proposal in changes.entries if proposal.id in known_ids
+        ]
+        changes.relationships = [
+            proposal
+            for proposal in changes.relationships
+            if (
+                proposal.resolved_source_id() in known_ids
+                and proposal.resolved_target_id() in known_ids
+            )
+        ]
         return self.planning_entities.reconcile(changes, source=source).model_dump()
 
     def _format_planning_entity_brief(
@@ -790,26 +1386,44 @@ class Planner:
             return ""
         return self.planning_entities.render_brief(entity_ids, volume_number=volume)
 
+    def _format_revealed_codex_index(self) -> str:
+        if self.codex is None:
+            return "（无已揭示设定集）"
+        entries = list(self.codex.iter_all())
+        if not entries:
+            return "（无已揭示设定集）"
+        lines = []
+        for e in entries[:40]:
+            alias_str = f"（别名：{'、'.join(e.aliases)}）" if e.aliases else ""
+            lines.append(f"  - {e.id}：{e.name}{alias_str}  [{e.type}]")
+        return "\n".join(lines)
+
     def _format_entity_registry(self) -> str:
         """Build combined author-side and reader-side entity context."""
         blocks: list[str] = []
         planning_brief = self._format_planning_entity_brief()
         if planning_brief:
             blocks.append(planning_brief)
-        if self.codex is not None:
-            entries = list(self.codex.iter_all())
-            if entries:
-                lines = ["读者向 Codex 实体清单（用于已公开事实与别名对齐）："]
-                for e in entries:
-                    alias_str = f"（别名：{'、'.join(e.aliases)}）" if e.aliases else ""
-                    lines.append(f"  - {e.id}：{e.name}{alias_str}  [{e.type}]")
-                blocks.append("\n".join(lines))
+        revealed = self._format_revealed_codex_index()
+        if revealed and revealed != "（无已揭示设定集）":
+            blocks.append(f"已揭示设定集索引（读者已知事实与别名对齐）：\n{revealed}")
         return "\n\n".join(blocks)
 
 
 # ----------------------------------------------------------------------
 # helpers
 # ----------------------------------------------------------------------
+def _planning_type_label(entry_type: str) -> str:
+    return {
+        "worldbuilding": "世界观",
+        "timeline": "时间线",
+        "faction": "势力",
+        "location": "地点",
+        "character": "角色",
+        "item": "物品",
+    }.get(entry_type, entry_type)
+
+
 def _format_existing_volumes(volumes: list[VolumeOutline]) -> str:
     if not volumes:
         return ""
@@ -916,6 +1530,7 @@ def _parse_chapter_json(
     volume: int | None,
     title: str,
     codex: CodexStore | None = None,
+    planning: PlanningCodexService | None = None,
 ) -> tuple[ChapterOutline, list[str]]:
     """Parse the LLM's chapter JSON, resolving entity ids against the codex.
 
@@ -935,11 +1550,16 @@ def _parse_chapter_json(
     # Resolve ids: LLM may produce drift (char_laozhao vs lao_zhao). If a codex
     # store is available, normalize every id through resolve_entity_id.
     def _resolve_list(raw_ids: list[str]) -> list[str]:
+        ids = [str(x) for x in raw_ids if str(x).strip()]
+        if planning is not None:
+            resolved, w = planning.resolve_entry_ids(ids, codex=codex)
+            warnings.extend(w)
+            return resolved
         if codex is None:
-            return [str(x) for x in raw_ids if str(x).strip()]
+            return ids
         from ..codex import resolve_entity_ids
 
-        resolved, res_log = resolve_entity_ids([str(x) for x in raw_ids], codex)
+        resolved, res_log = resolve_entity_ids(ids, codex)
         for r in res_log:
             if r.match_reason.startswith("fuzzy") or r.match_reason.startswith("guessed-name"):
                 warnings.append(
@@ -1000,8 +1620,14 @@ def _parse_chapter_json(
 # ----------------------------------------------------------------------
 # v2 pipeline helpers
 # ----------------------------------------------------------------------
-def _parse_raw_beats(data: dict, *, codex: CodexStore | None = None) -> list[RawBeat]:
+def _parse_raw_beats(
+    data: dict,
+    *,
+    codex: CodexStore | None = None,
+    planning: PlanningCodexService | None = None,
+) -> tuple[list[RawBeat], list[str]]:
     """Parse the LLM's beat chain JSON into RawBeat objects."""
+    warnings: list[str] = []
     raw = data.get("beats")
     if not isinstance(raw, list):
         raise ValueError("beat 链规划缺少 beats 数组")
@@ -1012,9 +1638,12 @@ def _parse_raw_beats(data: dict, *, codex: CodexStore | None = None) -> list[Raw
             continue
         beat_id = str(item.get("id", f"b{i + 1:02d}"))
         entities = [str(x) for x in (item.get("entities") or []) if str(x).strip()]
-        # Resolve entity ids against codex if available
-        if codex is not None and entities:
-            entities, _ = resolve_entity_ids(entities, codex)
+        if entities:
+            if planning is not None:
+                entities, w = planning.resolve_entry_ids(entities, codex=codex)
+                warnings.extend(w)
+            elif codex is not None:
+                entities, _ = resolve_entity_ids(entities, codex)
         beats.append(RawBeat(
             id=beat_id,
             goal=str(item.get("goal", "")).strip(),
@@ -1025,7 +1654,7 @@ def _parse_raw_beats(data: dict, *, codex: CodexStore | None = None) -> list[Raw
         ))
     if not beats:
         raise ValueError("beat 链为空")
-    return beats
+    return beats, warnings
 
 
 def _parse_assemble_from_raw(

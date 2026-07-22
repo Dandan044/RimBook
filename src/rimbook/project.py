@@ -24,6 +24,12 @@ _SUBDIRS = (
     "outline/chapters",
     "outline/volumes",
     "planning",
+    "planning/codex/characters",
+    "planning/codex/worldbuilding",
+    "planning/codex/locations",
+    "planning/codex/factions",
+    "planning/codex/items",
+    "planning/codex/timeline",
     "drafts",
     "final",
     "state",
@@ -95,8 +101,37 @@ class ProjectPaths:
 
     @property
     def planning_entities_file(self) -> Path:
-        """The author-side entity and relationship network."""
+        """Legacy single-file entity network (migration input only)."""
         return self.planning_dir / "entities.yaml"
+
+    @property
+    def planning_codex_dir(self) -> Path:
+        """Author-side full planning codex (six types, unrevealed facts allowed)."""
+        return self.planning_dir / "codex"
+
+    def planning_codex_subdir(self, entry_type: str) -> Path:
+        """Folder for one planning-codex type (mirrors revealed codex layout)."""
+        from .codex.models import ENTITY_TYPE_PLURALS
+
+        folder = ENTITY_TYPE_PLURALS.get(entry_type)
+        if folder is None:
+            raise ValueError(f"Unknown planning codex type {entry_type!r}")
+        return self.planning_codex_dir / folder
+
+    @property
+    def planning_relationships_file(self) -> Path:
+        """Cross-type relationship network for the author-side planning codex."""
+        return self.planning_dir / "relationships.yaml"
+
+    @property
+    def planning_expansion_state_file(self) -> Path:
+        """Checkpoint for the latest resumable world-expansion run."""
+        return self.planning_dir / "expansion-state.yaml"
+
+    @property
+    def planning_graph_layout_file(self) -> Path:
+        """Purely presentational node positions for the relationship graph."""
+        return self.planning_dir / "graph-layout.yaml"
 
     @property
     def reviews_dir(self) -> Path:

@@ -83,6 +83,7 @@ class ConfigUpdate(BaseModel):
     auto_consistency_check: bool | None = None
     auto_fix: bool | None = None
     max_fix_rounds: int | None = None
+    expansion_coefficient: int | None = Field(default=None, ge=1, le=4)
 
 
 # ---- routes ----
@@ -139,6 +140,12 @@ def create_project(req: ProjectCreate) -> ProjectInfo:
             "auto_checkpoint": True,
             "max_checkpoints": 50,
         },
+        "world_expansion": {
+            "coefficient": 1,
+            "max_total_entries": 120,
+            "max_total_relationships": 360,
+            "max_llm_calls": 80,
+        },
     }
     (target / "config.yaml").write_text(
         yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8"
@@ -177,6 +184,7 @@ def get_config(deps: ProjectDeps = Depends(get_project_deps)) -> dict:
             },
         },
         "generation": cfg.generation.model_dump(),
+        "world_expansion": cfg.world_expansion.model_dump(),
     }
 
 
@@ -220,6 +228,9 @@ def update_config(req: ConfigUpdate, deps: ProjectDeps = Depends(get_project_dep
         val = getattr(req, key, None)
         if val is not None:
             gen[key] = val
+    if req.expansion_coefficient is not None:
+        expansion = raw.setdefault("world_expansion", {})
+        expansion["coefficient"] = req.expansion_coefficient
     cfg_path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), encoding="utf-8")
     return {"ok": True}
 

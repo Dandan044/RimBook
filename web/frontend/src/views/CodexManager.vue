@@ -1,7 +1,7 @@
 <template>
   <div class="codex-manager">
     <div class="page-header">
-      <h1 class="page-title"><el-icon class="title-icon"><Collection /></el-icon>设定集</h1>
+      <h1 class="page-title"><el-icon class="title-icon"><Collection /></el-icon>已揭示设定集</h1>
     </div>
 
     <div class="codex-layout">

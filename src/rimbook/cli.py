@@ -163,6 +163,9 @@ class Deps:
             threads=self.threads,
             trace=self.trace,
             project_name=self.project_dir.name,
+            expansion_hard_max_calls=self.config.world_expansion.max_llm_calls,
+            expansion_hard_max_entries=self.config.world_expansion.max_total_entries,
+            expansion_hard_max_relationships=self.config.world_expansion.max_total_relationships,
         )
 
     @property
@@ -228,6 +231,12 @@ def init(
             "max_fix_rounds": 2,
             "codex_max_tokens": 2000,
             "codex_entry_max_chars": 1500,
+        },
+        "world_expansion": {
+            "coefficient": 1,
+            "max_total_entries": 120,
+            "max_total_relationships": 360,
+            "max_llm_calls": 80,
         },
     }
 

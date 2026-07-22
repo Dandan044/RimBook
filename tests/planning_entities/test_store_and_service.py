@@ -9,6 +9,7 @@ from rimbook.planning_entities import (
     PlanningEntity,
     PlanningEntityProposal,
     PlanningEntityStore,
+    PlanningCodexEntry,
     RelationshipProposal,
 )
 from rimbook.project import scaffold_project
@@ -38,14 +39,14 @@ def test_store_round_trips_and_deletes_linked_relationships(tmp_path):
     assert network.relationships[0].relationship_type == "student_of"
     assert store.delete_entity("hero") is True
     assert store.list_relationships() == []
-    assert store.paths.planning_entities_file.exists()
+    assert store.file_for("character", "mentor").exists()
 
 
 def test_relationship_requires_existing_entity_references(tmp_path):
     store, _ = _service(tmp_path)
     store.save_entity(PlanningEntity(id="hero", name="主角"))
 
-    with pytest.raises(ValueError, match="不存在的实体"):
+    with pytest.raises(ValueError, match="不存在的条目"):
         store.save_relationship(
             EntityRelationship(
                 id="hero-ghost",
@@ -142,3 +143,54 @@ def test_malformed_optional_llm_changes_are_ignored():
 
     assert [item.id for item in changes.entities] == ["hero"]
     assert [item.id for item in changes.relationships] == ["hero-mentor"]
+
+
+def test_old_state_fields_are_read_but_not_written_back(tmp_path):
+    store, _ = _service(tmp_path)
+    path = store.file_for("location", "loc_old")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "id: loc_old\n"
+        "name: 旧城\n"
+        "type: location\n"
+        "current_state: 封锁中\n"
+        "future_state: 将被摧毁\n"
+        "reveal_strategy: 由远行者第一次提到\n"
+        "---\n"
+        "一座已有百年历史的城市。\n",
+        encoding="utf-8",
+    )
+
+    entry = store.get_entry("loc_old")
+    assert "current_state" not in entry.model_dump()
+    assert "future_state" not in entry.model_dump()
+    assert entry.detail == "一座已有百年历史的城市。"
+    store.save_entry(entry)
+    rewritten = path.read_text(encoding="utf-8")
+    assert "current_state" not in rewritten
+    assert "future_state" not in rewritten
+
+
+def test_detail_generation_respects_detail_and_nested_locks(tmp_path):
+    store, service = _service(tmp_path)
+    store.save_entry(PlanningCodexEntry(
+        id="hero",
+        name="林默",
+        type="character",
+        detail="作者手写传记",
+        details={"fear": "害怕重蹈父亲覆辙"},
+        field_locks=["detail", "fear"],
+    ))
+
+    result = service.apply_detail(
+        "hero",
+        detail="AI 生成传记",
+        details_patch={"fear": "害怕失败", "voice": "短句、克制"},
+    )
+    entry = store.get_entry("hero")
+    assert entry.detail == "作者手写传记"
+    assert entry.details["fear"] == "害怕重蹈父亲覆辙"
+    assert entry.details["voice"] == "短句、克制"
+    assert "entity:hero.detail" in result.skipped_locked_fields
+    assert "entity:hero.fear" in result.skipped_locked_fields

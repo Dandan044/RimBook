@@ -31,6 +31,7 @@ __all__ = [
     "LLMConfig",
     "EmbeddingConfig",
     "GenerationConfig",
+    "WorldExpansionConfig",
     "Config",
     "load_config",
     "load_global_config",
@@ -127,11 +128,21 @@ class GenerationConfig(BaseModel):
     use_vector_retrieval: bool = False  # wire vector supplement into the default write path
 
 
+class WorldExpansionConfig(BaseModel):
+    """Budget preset for automatic author-side world expansion."""
+
+    coefficient: int = Field(default=1, ge=1, le=4)
+    max_total_entries: int = Field(default=120, ge=20, le=500)
+    max_total_relationships: int = Field(default=360, ge=20, le=2000)
+    max_llm_calls: int = Field(default=80, ge=1, le=500)
+
+
 class Config(BaseModel):
     """The full, resolved configuration for a novel project."""
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
     generation: GenerationConfig = Field(default_factory=GenerationConfig)
+    world_expansion: WorldExpansionConfig = Field(default_factory=WorldExpansionConfig)
     title: str = "Untitled Novel"
     author: str = ""
     language: str = "zh"
@@ -234,10 +245,18 @@ def load_config(project_dir: Path, *, global_cfg: dict[str, Any] | None = None) 
         track_threads=gen_raw.get("track_threads", True),
         use_vector_retrieval=gen_raw.get("use_vector_retrieval", False),
     )
+    expansion_raw = project_raw.get("world_expansion", {}) or {}
+    world_expansion = WorldExpansionConfig(
+        coefficient=expansion_raw.get("coefficient", 1),
+        max_total_entries=expansion_raw.get("max_total_entries", 120),
+        max_total_relationships=expansion_raw.get("max_total_relationships", 360),
+        max_llm_calls=expansion_raw.get("max_llm_calls", 80),
+    )
 
     return Config(
         llm=llm,
         generation=generation,
+        world_expansion=world_expansion,
         title=project_raw.get("title", "Untitled Novel"),
         author=project_raw.get("author", ""),
         language=project_raw.get("language", "zh"),

@@ -149,7 +149,7 @@ def test_plan_volume_v2_keynote_and_microscenes(tmp_path):
     planner = _planner(tmp_path, llm)
 
     events = list(planner.plan_volume_v2(1))
-    assert any(e["data"].get("step") == 3 and e["data"].get("status") == "done" for e in events if e["event"] == "step")
+    assert any(e["data"].get("step") == 4 and e["data"].get("status") == "done" for e in events if e["event"] == "step")
 
     # 5 LLM calls
     assert len(llm.calls) == 5
@@ -167,7 +167,7 @@ def test_plan_volume_v2_keynote_and_microscenes(tmp_path):
 
     beat_data = planner.outline.load_volume_beats(1)
     assert beat_data is not None
-    assert beat_data.step == 3
+    assert beat_data.step == 4
     assert beat_data.chapter_map[0].keynote
 
 

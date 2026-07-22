@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from rimbook.outline import ChapterOutline, SceneBeat, VolumeOutline, RawBeat, VolumeBeatData, MicroScene
@@ -118,6 +118,10 @@ class SynopsisIn(BaseModel):
     text: str
 
 
+class FoundationIn(SynopsisIn):
+    expansion_coefficient: int | None = Field(default=None, ge=1, le=4)
+
+
 class PlanChapterRequest(BaseModel):
     volume: int | None = None
     title: str = ""
@@ -144,9 +148,96 @@ def update_synopsis(req: SynopsisIn, deps: ProjectDeps = Depends(get_project_dep
 
 @router.post("/synopsis")
 def generate_synopsis(req: SynopsisIn, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
-    """LLM-generate synopsis from a premise. req.text = premise."""
+    """LLM-generate macro synopsis from a premise (sync compat). req.text = premise."""
     text = deps.planner.plan_synopsis(req.text)
     return {"text": text}
+
+
+@router.post("/foundation")
+def generate_foundation_sse(
+    project_id: str,
+    req: FoundationIn,
+    deps: ProjectDeps = Depends(get_project_deps),
+) -> EventSourceResponse:
+    """Foundation SSE: synopsis, rough codex, then six detail layers."""
+    import threading
+
+    started = task_registry.try_start(
+        project_id, "foundation", None, "正在生成项目基础设定…"
+    )
+
+    def _run() -> None:
+        try:
+            coefficient = (
+                req.expansion_coefficient
+                if req.expansion_coefficient is not None
+                else deps.config.world_expansion.coefficient
+            )
+            for event in deps.planner.plan_foundation(
+                req.text,
+                expansion_coefficient=coefficient,
+            ):
+                kind = event["event"]
+                data = event["data"]
+                if kind in {"step", "progress"}:
+                    msg = data.get("message") or f"Step {data.get('step')}"
+                    task_registry.update(project_id, "foundation", msg, None)
+                    # update() already broadcasts progress; step needs its
+                    # structured payload as a separate named event.
+                    if kind == "step":
+                        task_registry.publish(
+                            project_id, "foundation", None, kind, data
+                        )
+            task_registry.publish(project_id, "foundation", None, "done", {})
+            task_registry.mark_finished(project_id, "foundation", None)
+        except Exception as exc:  # noqa: BLE001
+            task_registry.publish(project_id, "foundation", None, "error", {"message": str(exc)})
+            task_registry.mark_finished(project_id, "foundation", None, error=str(exc))
+
+    if started:
+        threading.Thread(
+            target=_run,
+            name=f"foundation-{project_id}",
+            daemon=True,
+        ).start()
+
+    async def event_stream():
+        sub = task_registry.subscribe(project_id, "foundation", None)
+        if sub is None:
+            yield sse_event("error", {"message": "无法订阅基础设定任务"})
+            yield sse_done()
+            return
+        event_q, _, _, already_finished = sub
+        from queue import Empty
+        if already_finished:
+            yield sse_done()
+            return
+        while True:
+            try:
+                kind, payload = await asyncio.to_thread(event_q.get, True, 0.25)
+            except Empty:
+                t = task_registry.get(project_id, "foundation", None)
+                if t is None or t.finished:
+                    yield sse_done()
+                    return
+                continue
+            if kind == "__end__":
+                yield sse_done()
+                return
+            if kind == "step":
+                yield sse_event("step", payload)
+            elif kind == "progress":
+                msg = payload.get("message", "") if isinstance(payload, dict) else str(payload)
+                yield sse_progress(msg)
+            elif kind == "error":
+                yield sse_event("error", payload)
+                yield sse_done()
+                return
+            elif kind == "done":
+                yield sse_done(payload if isinstance(payload, dict) else {})
+                return
+
+    return EventSourceResponse(event_stream(), ping=10)
 
 
 # ---- volumes ----
@@ -461,13 +552,13 @@ def update_volume_beats(number: int, req: BeatUpdateRequest, deps: ProjectDeps =
     """Replace the raw beat list for a volume (user edits)."""
     data = deps.outline.load_volume_beats(number)
     if data is None:
-        data = VolumeBeatData(volume=number, step=2)
+        data = VolumeBeatData(volume=number, step=3)
     new_beats = []
     for i, b in enumerate(req.beats):
         beat_id = b.id or f"b{i + 1:02d}"
         new_beats.append(RawBeat(id=beat_id, goal=b.goal, conflict=b.conflict, outcome=b.outcome, entities=b.entities, momentum=b.momentum))
     data.raw_beats = new_beats
-    data.step = 2
+    data.step = 3
     data.refined_beats = []
     data.chapter_map = []
     deps.outline.save_volume_beats(data)
@@ -479,7 +570,7 @@ def add_volume_beat(number: int, req: RawBeatIn, deps: ProjectDeps = Depends(get
     """Add a single beat to the volume's beat chain."""
     data = deps.outline.load_volume_beats(number)
     if data is None:
-        data = VolumeBeatData(volume=number, step=2)
+        data = VolumeBeatData(volume=number, step=3)
     beat_id = req.id
     if not beat_id:
         existing_ids = {b.id for b in data.raw_beats}
@@ -488,7 +579,7 @@ def add_volume_beat(number: int, req: RawBeatIn, deps: ProjectDeps = Depends(get
             idx += 1
         beat_id = f"b{idx:02d}"
     data.raw_beats.append(RawBeat(id=beat_id, goal=req.goal, conflict=req.conflict, outcome=req.outcome, entities=req.entities, momentum=req.momentum))
-    data.step = 2
+    data.step = 3
     data.refined_beats = []
     data.chapter_map = []
     deps.outline.save_volume_beats(data)
@@ -505,7 +596,7 @@ def delete_volume_beat(number: int, beat_id: str, deps: ProjectDeps = Depends(ge
     data.raw_beats = [b for b in data.raw_beats if b.id != beat_id]
     if len(data.raw_beats) == original_len:
         raise HTTPException(404, f"Beat '{beat_id}' 不存在")
-    data.step = 2
+    data.step = 3
     data.refined_beats = []
     data.chapter_map = []
     deps.outline.save_volume_beats(data)
@@ -525,7 +616,7 @@ def reorder_volume_beats(number: int, req: BeatReorderRequest, deps: ProjectDeps
         if b.id not in ordered_set:
             reordered.append(b)
     data.raw_beats = reordered
-    data.step = 2
+    data.step = 3
     data.refined_beats = []
     data.chapter_map = []
     deps.outline.save_volume_beats(data)

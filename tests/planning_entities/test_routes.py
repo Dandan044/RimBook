@@ -48,7 +48,8 @@ def test_routes_manage_entity_relationship_locks_and_sync(tmp_path):
 
     assert relationship.id == "hero-mentor"
     assert set_field_lock("hero", FieldLockIn(item_type="entity", field_name="secret", locked=True), deps) == {"ok": True}
-    assert get_network(deps).entities[0].field_locks == ["secret"]
+    locked = next(e for e in get_network(deps).entities if e.id == "hero")
+    assert locked.field_locks == ["secret"]
     assert sync_network(SyncIn(volume=2), deps) == {"change_count": 1, "volume": 2}
     assert delete_entity("hero", deps) == {"ok": True}
     assert get_network(deps).relationships == []

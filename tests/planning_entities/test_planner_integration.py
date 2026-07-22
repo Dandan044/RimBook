@@ -44,7 +44,7 @@ def _beat(number: int) -> dict[str, Any]:
     }
 
 
-def test_volume_v2_syncs_before_outline_and_reconciles_planned_cast(tmp_path):
+def test_volume_v2_cast_expansion_before_beats(tmp_path):
     paths = scaffold_project(tmp_path / "project", exist_ok=True)
     outline = OutlineStore(paths)
     outline.write_synopsis("林默必须查清旧案，并决定是否相信带着秘密的周岚。")
@@ -67,28 +67,36 @@ def test_volume_v2_syncs_before_outline_and_reconciles_planned_cast(tmp_path):
     ]
     micros = [{"beats": [{**beat, "scenes": []} for beat in beats[i:i + 4]]} for i in range(0, 12, 4)]
     llm = FakeLLM([
-        {"entities": [{"id": "hero", "name": "林默", "surface_goal": "查清旧案"}]},
         {
             "title": "旧案卷",
             "arc": "林默发现证据被周岚隐瞒。",
             "ending": "周岚交出半份档案。",
             "chapter_count": 3,
-            "entity_changes": {
-                "entities": [{"id": "mentor", "name": "周岚", "story_role": "秘密持有人"}]
-            },
         },
         {
-            "beats": beats,
-            "entity_changes": {
-                "relationships": [{
-                    "id": "hero-mentor",
-                    "source_entity_id": "hero",
-                    "target_entity_id": "mentor",
-                    "relationship_type": "allies",
-                    "conflict": "是否交出真相",
-                }]
-            },
+            "entries": [
+                {
+                    "id": "hero", "name": "林默", "type": "character",
+                    "surface_summary": "查清旧案",
+                    "exists_at_anchor": True,
+                    "existence_reason": "本卷开始前已经存在",
+                },
+                {
+                    "id": "mentor", "name": "周岚", "type": "character",
+                    "narrative_role": "秘密持有人",
+                    "exists_at_anchor": True,
+                    "existence_reason": "本卷开始前已在旧案中任职",
+                },
+            ],
+            "relationships": [{
+                "id": "hero-mentor",
+                "source_id": "hero",
+                "target_id": "mentor",
+                "relationship_type": "allies",
+                "conflict": "是否交出真相",
+            }],
         },
+        {"beats": beats},
         {"chapters": chapters},
         *micros,
     ])
@@ -96,10 +104,13 @@ def test_volume_v2_syncs_before_outline_and_reconciles_planned_cast(tmp_path):
 
     events = list(planner.plan_volume_v2(1))
 
-    assert events[0]["data"]["step"] == 0
-    assert events[1]["data"]["status"] == "done"
-    assert "林默" in llm.calls[1][-1]["content"]  # Step 1 sees the backfilled network.
-    assert "周岚" in llm.calls[2][-1]["content"]  # Step 2 sees the cast from Step 1.
+    assert events[0]["data"]["step"] == 1
+    step2_done = next(
+        e for e in events
+        if e["event"] == "step" and e["data"].get("step") == 2 and e["data"].get("status") == "done"
+    )
+    assert step2_done["data"]["status"] == "done"
+    assert "林默" in llm.calls[2][-1]["content"]  # Step 3 beats sees cast from Step 2.
     network = service.store.read_network()
     assert {entity.id for entity in network.entities} == {"hero", "mentor"}
     assert network.relationships[0].conflict == "是否交出真相"

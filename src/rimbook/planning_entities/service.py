@@ -1,39 +1,54 @@
-"""Merge and prompt-context services for author-side planning entities."""
+"""Merge and prompt-context services for the author-side planning codex."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from ..codex.models import VALID_TYPES
 from .models import (
-    EntityNetworkChanges,
-    EntityRelationship,
-    PlanningEntity,
-    PlanningEntityProposal,
+    PlanningCodexChanges,
+    PlanningCodexEntry,
+    PlanningCodexProposal,
+    PlanningRelationship,
     RelationshipProposal,
 )
-from .store import PlanningEntityStore
+from .store import PlanningCodexStore
 
-__all__ = ["EntityNetworkService", "ReconcileResult"]
+if TYPE_CHECKING:
+    from ..codex.store import CodexStore
+
+__all__ = ["PlanningCodexService", "EntityNetworkService", "ReconcileResult"]
 
 
 @dataclass
 class ReconcileResult:
-    """A small, serializable summary of a network reconciliation."""
+    """A small, serializable summary of a codex reconciliation."""
 
-    created_entities: list[str] = field(default_factory=list)
-    updated_entities: list[str] = field(default_factory=list)
+    created_entries: list[str] = field(default_factory=list)
+    updated_entries: list[str] = field(default_factory=list)
     created_relationships: list[str] = field(default_factory=list)
     updated_relationships: list[str] = field(default_factory=list)
     skipped_locked_fields: list[str] = field(default_factory=list)
     skipped_relationships: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    # Legacy aliases
+    @property
+    def created_entities(self) -> list[str]:
+        return self.created_entries
+
+    @property
+    def updated_entities(self) -> list[str]:
+        return self.updated_entries
 
     @property
     def change_count(self) -> int:
         return sum(
             len(values)
             for values in (
-                self.created_entities,
-                self.updated_entities,
+                self.created_entries,
+                self.updated_entries,
                 self.created_relationships,
                 self.updated_relationships,
             )
@@ -41,119 +56,642 @@ class ReconcileResult:
 
     def model_dump(self) -> dict[str, object]:
         return {
-            "created_entities": self.created_entities,
-            "updated_entities": self.updated_entities,
+            "created_entries": self.created_entries,
+            "updated_entries": self.updated_entries,
             "created_relationships": self.created_relationships,
             "updated_relationships": self.updated_relationships,
+            "created_entities": self.created_entries,
+            "updated_entities": self.updated_entries,
             "skipped_locked_fields": self.skipped_locked_fields,
             "skipped_relationships": self.skipped_relationships,
+            "warnings": self.warnings,
             "change_count": self.change_count,
         }
 
 
-class EntityNetworkService:
+_TYPE_LABELS = {
+    "character": "角色",
+    "worldbuilding": "世界观",
+    "location": "地点",
+    "faction": "势力",
+    "item": "物品",
+    "timeline": "时间线",
+}
+
+DETAIL_TYPE_ORDER = (
+    "worldbuilding",
+    "timeline",
+    "faction",
+    "location",
+    "character",
+    "item",
+)
+
+
+class PlanningCodexService:
     """Applies AI proposals safely and renders compact planning context."""
 
-    def __init__(self, store: PlanningEntityStore) -> None:
+    def __init__(self, store: PlanningCodexStore) -> None:
         self.store = store
 
-    def reconcile(self, changes: EntityNetworkChanges, *, source: str) -> ReconcileResult:
+    def reconcile(self, changes: PlanningCodexChanges, *, source: str) -> ReconcileResult:
         """Merge proposed changes while preserving every explicitly locked field."""
         result = ReconcileResult()
-        network = self.store.read_network()
-        entities = {entity.id: entity for entity in network.entities}
-        relationships = {relation.id: relation for relation in network.relationships}
+        entries = {e.id: e for e in self.store.list_entries()}
+        relationships = {r.id: r for r in self.store.list_relationships()}
 
-        for proposal in changes.entities:
-            existing = entities.get(proposal.id)
+        for proposal in changes.entries:
+            existing = entries.get(proposal.id)
             if existing is None:
-                entity = self._new_entity(proposal, source)
-                network.entities.append(entity)
-                entities[entity.id] = entity
-                result.created_entities.append(entity.id)
+                entry = self._new_entry(proposal, source)
+                self.store.save_entry(entry)
+                entries[entry.id] = entry
+                result.created_entries.append(entry.id)
                 continue
-            if self._merge_entity(existing, proposal, result):
+            if self._merge_entry(existing, proposal, result):
                 existing.source = source
-                result.updated_entities.append(existing.id)
+                self.store.save_entry(existing)
+                result.updated_entries.append(existing.id)
 
         for proposal in changes.relationships:
             existing = relationships.get(proposal.id)
             if existing is None:
                 relationship = self._new_relationship(proposal, source)
-                if relationship is None or not self._relationship_endpoints_exist(relationship, entities):
+                if relationship is None or not self._relationship_endpoints_exist(relationship, entries):
                     result.skipped_relationships.append(proposal.id)
                     continue
-                network.relationships.append(relationship)
+                self.store.save_relationship(relationship)
                 relationships[relationship.id] = relationship
                 result.created_relationships.append(relationship.id)
                 continue
             proposed_endpoints = (
-                proposal.source_entity_id or existing.source_entity_id,
-                proposal.target_entity_id or existing.target_entity_id,
+                proposal.resolved_source_id(existing.source_id) or existing.source_id,
+                proposal.resolved_target_id(existing.target_id) or existing.target_id,
             )
-            if any(endpoint not in entities for endpoint in proposed_endpoints):
+            if any(endpoint not in entries for endpoint in proposed_endpoints):
                 result.skipped_relationships.append(proposal.id)
                 continue
             if self._merge_relationship(existing, proposal, result):
                 existing.source = source
+                self.store.save_relationship(existing)
                 result.updated_relationships.append(existing.id)
 
-        if result.change_count:
-            self.store.write_network(network)
         return result
+
+    def apply_foundation_entries(
+        self,
+        raw_entries: list[dict],
+        *,
+        source: str = "foundation",
+        require_existence: bool = False,
+    ) -> ReconcileResult:
+        """Import rough entries one-by-one and enforce story-anchor existence.
+
+        When ``require_existence`` is true, candidates must explicitly assert
+        ``exists_at_anchor=true``. A future-created existence may instead
+        provide ``formation_event``; only that timeline event is persisted.
+        """
+        result = ReconcileResult()
+        proposals: list[PlanningCodexProposal] = []
+        for item in raw_entries:
+            if not isinstance(item, dict):
+                continue
+            if require_existence and item.get("exists_at_anchor") is not True:
+                if item.get("type") == "timeline":
+                    payload = {
+                        key: value
+                        for key, value in item.items()
+                        if key not in {
+                            "exists_at_anchor",
+                            "existence_reason",
+                            "formation_event",
+                        }
+                    }
+                    details = dict(payload.get("details") or {})
+                    details.setdefault("event_status", "planned")
+                    payload["details"] = details
+                    try:
+                        proposals.append(
+                            PlanningCodexProposal.model_validate(payload)
+                        )
+                        result.warnings.append(
+                            f"{item.get('name') or item.get('id')}尚未发生，"
+                            "已作为 planned 时间线事件保留"
+                        )
+                    except Exception:
+                        result.warnings.append(
+                            f"跳过无效未来时间线事件: {item.get('id', '?')}"
+                        )
+                    continue
+                event = self._formation_event_proposal(item)
+                if event is not None:
+                    proposals.append(event)
+                    result.warnings.append(
+                        f"{item.get('name') or item.get('id') or '未命名设定'}尚未存在，"
+                        f"已仅记录其成立事件 {event.id}"
+                    )
+                else:
+                    result.warnings.append(
+                        f"跳过尚未在故事锚点存在的设定: {item.get('id', '?')}"
+                    )
+                continue
+            try:
+                payload = {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"exists_at_anchor", "existence_reason", "formation_event"}
+                }
+                proposals.append(PlanningCodexProposal.model_validate(payload))
+            except Exception:
+                result.warnings.append(f"跳过无效设定条目: {item.get('id', '?')}")
+        reconciled = self.reconcile(
+            PlanningCodexChanges(entries=proposals),
+            source=source,
+        )
+        reconciled.warnings[:0] = result.warnings
+        return reconciled
+
+    @staticmethod
+    def _formation_event_proposal(item: dict) -> PlanningCodexProposal | None:
+        raw = item.get("formation_event")
+        if not raw:
+            return None
+        original_id = str(item.get("id") or "future_existence").strip()
+        original_name = str(item.get("name") or original_id).strip()
+        if isinstance(raw, str):
+            event_id = f"evt_{original_id.removeprefix('evt_')}_formation"
+            name = f"{original_name}的成立"
+            summary = raw.strip()
+            detail = ""
+        elif isinstance(raw, dict):
+            event_id = str(raw.get("id") or f"evt_{original_id}_formation").strip()
+            name = str(raw.get("name") or f"{original_name}的成立").strip()
+            summary = str(raw.get("surface_summary") or raw.get("description") or "").strip()
+            detail = str(raw.get("detail") or "").strip()
+        else:
+            return None
+        if not event_id or not name or not summary:
+            return None
+        return PlanningCodexProposal(
+            id=event_id,
+            name=name,
+            type="timeline",
+            surface_summary=summary,
+            narrative_role=f"记录{original_name}从不存在到成立的剧情事件",
+            reveal_strategy="随成立事件在正文中发生而首次呈现",
+            detail=detail,
+            details={
+                "event_kind": "formation",
+                "event_status": "planned",
+                "future_entry_id": original_id,
+                "future_entry_type": str(item.get("type") or ""),
+            },
+        )
+
+    def entries_needing_detail(
+        self,
+        *,
+        entry_type: str | None = None,
+        entry_ids: list[str] | None = None,
+    ) -> list[PlanningCodexEntry]:
+        wanted = set(entry_ids or [])
+        return [
+            entry
+            for entry in self.store.list_entries(entry_type)
+            if (not wanted or entry.id in wanted) and not entry.detail.strip()
+        ]
+
+    def apply_detail(
+        self,
+        entry_id: str,
+        *,
+        detail: str,
+        details_patch: dict | None = None,
+        source: str = "detail_generation",
+    ) -> ReconcileResult:
+        """Merge one generated long-form detail and its structured extraction."""
+        entry = self.store.get_entry(entry_id)
+        normalized_patch = self._normalize_details_patch(
+            entry.type,
+            dict(details_patch or {}),
+        )
+        proposal = PlanningCodexProposal(
+            id=entry_id,
+            detail=detail.strip(),
+            details=normalized_patch,
+        )
+        return self.reconcile(
+            PlanningCodexChanges(entries=[proposal]),
+            source=source,
+        )
+
+    @staticmethod
+    def _normalize_details_patch(
+        entry_type: str,
+        details_patch: dict,
+    ) -> dict:
+        """Normalize common localized LLM keys to stable machine fields."""
+        if entry_type != "character":
+            return details_patch
+        aliases = {
+            "深层需求": "inner_need",
+            "内在需求": "inner_need",
+            "核心欲望": "inner_need",
+            "欲望": "inner_need",
+            "恐惧": "fear",
+            "核心恐惧": "fear",
+            "缺陷": "flaw",
+            "核心缺陷": "flaw",
+            "价值观": "values",
+            "观点": "values",
+            "能力": "capabilities",
+            "关键技能": "capabilities",
+            "限制": "limitations",
+            "盲区": "limitations",
+            "说话方式": "voice",
+            "声音与语言": "voice",
+            "行动习惯": "action_style",
+            "行动方式": "action_style",
+            "关键经历": "key_experiences",
+        }
+        normalized = dict(details_patch)
+        for raw_key, canonical in aliases.items():
+            if raw_key not in normalized:
+                continue
+            if canonical not in normalized or not normalized[canonical]:
+                normalized[canonical] = normalized[raw_key]
+            if raw_key != canonical:
+                normalized.pop(raw_key, None)
+        return normalized
+
+    def render_detail_context(
+        self,
+        entry_id: str,
+        *,
+        synopsis: str,
+        max_related: int = 10,
+        max_chars: int = 14000,
+    ) -> str:
+        """Build bounded context from world rules, upstream details and relations."""
+        target = self.store.get_entry(entry_id)
+        all_entries = self.store.list_entries()
+        by_id = {entry.id: entry for entry in all_entries}
+        relations = self.store.list_relationships()
+        related_ids: list[str] = []
+        relation_lines: list[str] = []
+        for relation in relations:
+            if relation.source_id == entry_id:
+                related_ids.append(relation.target_id)
+            elif relation.target_id == entry_id:
+                related_ids.append(relation.source_id)
+            else:
+                continue
+            relation_lines.append(
+                f"- {relation.source_id} → {relation.target_id}"
+                f"（{relation.relationship_type}）："
+                f"{relation.conflict or relation.stakes or relation.status or '有关联'}"
+            )
+
+        upstream_rank = DETAIL_TYPE_ORDER.index(target.type)
+        candidates: list[PlanningCodexEntry] = []
+        # Worldbuilding is an implicit parent of every entry.
+        candidates.extend(
+            entry for entry in all_entries
+            if entry.type == "worldbuilding" and entry.id != entry_id
+        )
+        candidates.extend(
+            by_id[rid] for rid in related_ids
+            if rid in by_id and rid != entry_id
+        )
+        candidates.extend(
+            entry for entry in all_entries
+            if entry.id != entry_id
+            and entry.type in DETAIL_TYPE_ORDER[:upstream_rank]
+            and entry.detail
+        )
+
+        unique: list[PlanningCodexEntry] = []
+        seen: set[str] = set()
+        for entry in candidates:
+            if entry.id in seen:
+                continue
+            seen.add(entry.id)
+            unique.append(entry)
+            if len(unique) >= max_related:
+                break
+
+        blocks = [
+            f"【宏观梗概】\n{synopsis.strip()}",
+            "【当前待细化条目】\n"
+            f"id: {target.id}\n名称: {target.name}\n类型: {target.type}\n"
+            f"公开面: {target.surface_summary or '待定'}\n"
+            f"叙事职责: {target.narrative_role or '待定'}\n"
+            f"幕后真相: {target.secret_truth or '无'}\n"
+            f"首次登场方式: {target.reveal_strategy or '待定'}\n"
+            f"结构化细节: {target.details or {}}",
+        ]
+        planned_events = [
+            entry
+            for entry in all_entries
+            if entry.type == "timeline"
+            and entry.details.get("event_status") == "planned"
+        ]
+        if planned_events:
+            blocks.append(
+                "【尚未发生的事件——绝不可写成既成事实】\n"
+                + "\n".join(
+                    f"- {entry.id}（{entry.name}）："
+                    f"{entry.surface_summary or '仅为未来计划'}"
+                    for entry in planned_events
+                )
+            )
+        if relation_lines:
+            blocks.append("【显式关系】\n" + "\n".join(relation_lines))
+        if unique:
+            lines = ["【相关与上游设定】"]
+            for entry in unique:
+                excerpt = (entry.detail or entry.surface_summary or entry.secret_truth)[:1200]
+                lines.append(
+                    f"- [{entry.type}] {entry.id}（{entry.name}）：{excerpt or '仅有粗略设定'}"
+                )
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)[:max_chars]
+
+    def detail_quality_issues(
+        self,
+        entry_id: str,
+        detail: str,
+    ) -> list[str]:
+        """Apply deterministic quality gates before a generated detail is saved."""
+        issues: list[str] = []
+        target = self.store.get_entry(entry_id)
+        if len(detail) < 240:
+            issues.append(f"详情过短（{len(detail)} 字符）")
+        if detail.count("\n") < 2:
+            issues.append("缺少分段与时间/因果层次")
+        for heading in ("未来走向", "未来发展", "结局走向"):
+            if heading in detail:
+                issues.append(f"包含超出故事锚点的章节“{heading}”")
+        if (
+            target.type == "timeline"
+            and target.details.get("event_status") == "planned"
+        ):
+            if "尚未发生" not in detail:
+                issues.append("planned 时间线未明确标注“尚未发生”")
+            for phrase in ("已完成", "已满足", "已经完成", "已经满足"):
+                if phrase in detail:
+                    issues.append(f"planned 时间线把未来条件写成既成事实：“{phrase}”")
+
+        planned = [
+            entry
+            for entry in self.store.list_entries("timeline")
+            if entry.details.get("event_status") == "planned"
+        ]
+        establishment_verbs = ("已经成立", "已成立", "共同建立", "建立了", "已经形成", "形成了")
+        negations = ("尚未", "还未", "计划", "准备", "条件", "未来")
+        for event in planned:
+            label = event.name
+            for suffix in ("的成立", "成立事件", "成立"):
+                label = label.removesuffix(suffix)
+            if len(label) < 2:
+                continue
+            start = 0
+            while True:
+                index = detail.find(label, start)
+                if index < 0:
+                    break
+                window = detail[max(0, index - 35): index + len(label) + 50]
+                if (
+                    any(verb in window for verb in establishment_verbs)
+                    and not any(word in window for word in negations)
+                ):
+                    issues.append(f"把尚未发生的“{event.name}”写成了既成事实")
+                    break
+                start = index + len(label)
+        return issues
 
     def render_brief(
         self,
-        entity_ids: list[str] | None = None,
+        entry_ids: list[str] | None = None,
         *,
         volume_number: int | None = None,
-        max_entities: int = 12,
+        max_entries: int = 16,
+        entry_types: list[str] | None = None,
     ) -> str:
         """Render an author-only, token-bounded brief for planning prompts."""
-        network = self.store.read_network()
-        wanted = set(entity_ids or [])
-        entities = [
-            entity for entity in network.entities
-            if not wanted or entity.id in wanted
-        ][:max_entities]
-        if not entities:
-            return "暂无幕后实体档案。若剧情需要新出场主体，请提出结构化实体与关系提议。"
+        wanted = set(entry_ids or [])
+        allowed_types = set(entry_types or VALID_TYPES)
+        entries = [
+            entry for entry in self.store.list_entries()
+            if entry.type in allowed_types and (not wanted or entry.id in wanted)
+        ][:max_entries]
+        if not entries:
+            return "暂无完整设定集条目。若剧情需要新出场主体，请提出结构化设定与关系提议。"
 
-        selected = {entity.id for entity in entities}
-        lines = ["【幕后实体与关系网（仅供规划，禁止按此向读者直接泄露）】"]
-        for entity in entities:
-            arc = entity.arc.current or entity.arc.destination
-            volume_role = entity.volume_roles.get(str(volume_number), "") if volume_number else ""
-            details = [
-                f"身份/职责：{entity.story_role or entity.kind}",
-                f"表层目标：{entity.surface_goal or '待定'}",
-                f"内在需求/恐惧：{entity.inner_need or '待定'} / {entity.fear or '待定'}",
-                f"缺陷：{entity.flaw or '待定'}",
-            ]
-            if arc:
-                details.append(f"弧线：{arc}")
+        selected = {entry.id for entry in entries}
+        lines = ["【完整设定集（仅供规划，禁止向读者直接泄露幕后字段）】"]
+        for entry in entries:
+            type_label = _TYPE_LABELS.get(entry.type, entry.type)
+            volume_role = entry.volume_roles.get(str(volume_number), "") if volume_number else ""
+            details_bits: list[str] = []
+            if entry.narrative_role:
+                details_bits.append(f"叙事职责：{entry.narrative_role}")
+            if entry.surface_summary:
+                details_bits.append(f"公开面：{entry.surface_summary}")
+            if entry.secret_truth:
+                details_bits.append(f"幕后真相：{entry.secret_truth}")
+            if entry.reveal_strategy:
+                details_bits.append(f"首次登场：{entry.reveal_strategy}")
+            if entry.detail:
+                details_bits.append(f"详情摘要：{entry.detail[:500]}")
+            for key, value in (entry.details or {}).items():
+                if key in {"arc"} or not value:
+                    continue
+                if isinstance(value, dict):
+                    continue
+                details_bits.append(f"{key}：{value}")
             if volume_role:
-                details.append(f"本卷职责：{volume_role}")
-            lines.append(f"- {entity.id}（{entity.name}）：{'；'.join(details)}")
+                details_bits.append(f"本卷职责：{volume_role}")
+            if entry.revealed_ref:
+                details_bits.append(f"已揭示关联：{entry.revealed_ref}")
+            lines.append(
+                f"- [{type_label}] {entry.id}（{entry.name}）："
+                f"{'；'.join(details_bits) or '待定'}"
+            )
 
-        for relation in network.relationships:
-            if relation.source_entity_id not in selected or relation.target_entity_id not in selected:
+        for relation in self.store.list_relationships():
+            if relation.source_id not in selected or relation.target_id not in selected:
                 continue
             tension = relation.conflict or relation.stakes or relation.status
             lines.append(
-                f"- 关系 {relation.source_entity_id} → {relation.target_entity_id}"
+                f"- 关系 {relation.source_id} → {relation.target_id}"
                 f"（{relation.relationship_type}）：{tension or '待定'}"
             )
         return "\n".join(lines)
 
+    def render_index(self, *, max_per_type: int = 12) -> str:
+        """Compact index of all entry ids grouped by type."""
+        lines: list[str] = []
+        for entry_type in VALID_TYPES:
+            items = self.store.list_entries(entry_type)[:max_per_type]
+            if not items:
+                continue
+            label = _TYPE_LABELS.get(entry_type, entry_type)
+            lines.append(f"{label}：" + "、".join(f"{e.id}({e.name})" for e in items))
+        return "\n".join(lines) if lines else "（空）"
+
+    def build_graph(
+        self,
+        *,
+        entry_types: list[str] | None = None,
+        focus: str | None = None,
+        depth: int = 1,
+        include_implicit_world: bool = False,
+    ) -> dict[str, list[dict]]:
+        """Project codex entries and relations into a UI-ready graph."""
+        allowed = set(entry_types or VALID_TYPES)
+        entries = [
+            entry for entry in self.store.list_entries()
+            if entry.type in allowed
+        ]
+        visible_ids = {entry.id for entry in entries}
+        relations = [
+            relation for relation in self.store.list_relationships()
+            if relation.source_id in visible_ids and relation.target_id in visible_ids
+        ]
+
+        implicit_edges: list[dict] = []
+        if include_implicit_world:
+            worlds = [entry.id for entry in entries if entry.type == "worldbuilding"]
+            for world_id in worlds:
+                for entry in entries:
+                    if entry.id == world_id:
+                        continue
+                    implicit_edges.append({
+                        "id": f"implicit_world_{world_id}_{entry.id}",
+                        "source": world_id,
+                        "target": entry.id,
+                        "relationship_type": "world_context",
+                        "kind": "implicit_world",
+                        "label": "世界规则",
+                    })
+
+        explicit_edges = [
+            {
+                "id": relation.id,
+                "source": relation.source_id,
+                "target": relation.target_id,
+                "relationship_type": relation.relationship_type,
+                "kind": "explicit",
+                "label": relation.relationship_type,
+                "conflict": relation.conflict,
+                "stakes": relation.stakes,
+                "status": relation.status,
+                "tags": relation.tags,
+            }
+            for relation in relations
+        ]
+        all_edges = [*explicit_edges, *implicit_edges]
+
+        if focus and focus in visible_ids:
+            adjacency: dict[str, set[str]] = {entry_id: set() for entry_id in visible_ids}
+            for edge in all_edges:
+                adjacency[edge["source"]].add(edge["target"])
+                adjacency[edge["target"]].add(edge["source"])
+            focused = {focus}
+            frontier = {focus}
+            for _ in range(max(depth, 0)):
+                next_frontier = {
+                    neighbour
+                    for node_id in frontier
+                    for neighbour in adjacency.get(node_id, set())
+                } - focused
+                focused.update(next_frontier)
+                frontier = next_frontier
+            entries = [entry for entry in entries if entry.id in focused]
+            all_edges = [
+                edge for edge in all_edges
+                if edge["source"] in focused and edge["target"] in focused
+            ]
+
+        degree: dict[str, int] = {entry.id: 0 for entry in entries}
+        for edge in all_edges:
+            degree[edge["source"]] = degree.get(edge["source"], 0) + 1
+            degree[edge["target"]] = degree.get(edge["target"], 0) + 1
+        nodes = [
+            {
+                "id": entry.id,
+                "name": entry.name,
+                "type": entry.type,
+                "summary": entry.surface_summary,
+                "narrative_role": entry.narrative_role,
+                "tags": entry.tags,
+                "planned": (
+                    entry.type == "timeline"
+                    and entry.details.get("event_status") == "planned"
+                ),
+                "expansion_depth": entry.details.get("expansion_depth", 0),
+                "expansion_run_id": entry.details.get("expansion_run_id", ""),
+                "degree": degree.get(entry.id, 0),
+            }
+            for entry in entries
+        ]
+        return {"nodes": nodes, "edges": all_edges}
+
+    def resolve_entry_ids(
+        self,
+        raw_ids: list[str],
+        *,
+        codex: "CodexStore | None" = None,
+    ) -> tuple[list[str], list[str]]:
+        """Resolve ids against planning codex first, then revealed codex via revealed_ref."""
+        from ..codex import resolve_entity_ids
+
+        resolved: list[str] = []
+        warnings: list[str] = []
+        planning_by_id = {e.id: e for e in self.store.list_entries()}
+        planning_by_ref = {
+            e.revealed_ref: e.id for e in planning_by_id.values() if e.revealed_ref
+        }
+
+        for raw in raw_ids:
+            rid = str(raw).strip()
+            if not rid:
+                continue
+            if rid.startswith("new:"):
+                resolved.append(rid[4:].strip() or rid)
+                continue
+            if rid in planning_by_id:
+                resolved.append(rid)
+                continue
+            if rid in planning_by_ref:
+                canonical = planning_by_ref[rid]
+                warnings.append(f"规划 id 对齐：{rid} → {canonical}（revealed_ref）")
+                resolved.append(canonical)
+                continue
+            if codex is not None:
+                batch, log = resolve_entity_ids([rid], codex)
+                if batch:
+                    resolved.append(batch[0])
+                    for r in log:
+                        if r.raw_id != r.canonical_id:
+                            warnings.append(
+                                f"已揭示设定 id 对齐：{r.raw_id or rid} → {r.canonical_id}"
+                            )
+                    continue
+            resolved.append(rid)
+        return resolved, warnings
+
     @staticmethod
-    def _new_entity(proposal: PlanningEntityProposal, source: str) -> PlanningEntity:
+    def _new_entry(proposal: PlanningCodexProposal, source: str) -> PlanningCodexEntry:
         fields = proposal.model_dump(exclude_none=True)
         fields.pop("id", None)
+        entry_type = fields.pop("type", None) or "character"
         name = fields.pop("name", None) or proposal.id
-        return PlanningEntity(
+        return PlanningCodexEntry(
             id=proposal.id,
             name=name,
+            type=entry_type,
             source=source,
             **fields,
         )
@@ -161,58 +699,102 @@ class EntityNetworkService:
     @staticmethod
     def _new_relationship(
         proposal: RelationshipProposal, source: str
-    ) -> EntityRelationship | None:
-        if not proposal.source_entity_id or not proposal.target_entity_id:
+    ) -> PlanningRelationship | None:
+        source_id = proposal.resolved_source_id()
+        target_id = proposal.resolved_target_id()
+        if not source_id or not target_id:
             return None
         fields = proposal.model_dump(exclude_none=True)
         fields.pop("id", None)
-        return EntityRelationship(id=proposal.id, source=source, **fields)
-
-    @staticmethod
-    def _relationship_endpoints_exist(
-        relationship: EntityRelationship, entities: dict[str, PlanningEntity]
-    ) -> bool:
-        return (
-            relationship.source_entity_id in entities
-            and relationship.target_entity_id in entities
+        fields.pop("source_entity_id", None)
+        fields.pop("target_entity_id", None)
+        return PlanningRelationship(
+            id=proposal.id,
+            source_id=source_id,
+            target_id=target_id,
+            source=source,
+            **{k: v for k, v in fields.items() if k not in {"source_id", "target_id"}},
         )
 
     @staticmethod
-    def _merge_entity(
-        entity: PlanningEntity,
-        proposal: PlanningEntityProposal,
+    def _relationship_endpoints_exist(
+        relationship: PlanningRelationship,
+        entries: dict[str, PlanningCodexEntry],
+    ) -> bool:
+        return (
+            relationship.source_id in entries
+            and relationship.target_id in entries
+        )
+
+    @staticmethod
+    def _merge_entry(
+        entry: PlanningCodexEntry,
+        proposal: PlanningCodexProposal,
         result: ReconcileResult,
     ) -> bool:
+        from .models import _LOCK_TO_ENTRY
+
         changed = False
         for field_name, value in proposal.model_dump(exclude_none=True).items():
             if field_name == "id":
                 continue
-            if entity.is_locked(field_name):
-                result.skipped_locked_fields.append(f"entity:{entity.id}.{field_name}")
+            lock_aliases = {field_name, _LOCK_TO_ENTRY.get(field_name, field_name)}
+            locked_name = next((name for name in lock_aliases if entry.is_locked(name)), None)
+            if locked_name is not None:
+                # Prefer legacy label when the lock was set via character field names.
+                from .models import _LOCK_TO_ENTITY
+                label = _LOCK_TO_ENTITY.get(locked_name, locked_name)
+                result.skipped_locked_fields.append(f"entity:{entry.id}.{label}")
                 continue
             if field_name == "volume_roles":
-                value = {**entity.volume_roles, **value}
-            if getattr(entity, field_name) != value:
-                setattr(entity, field_name, value)
+                value = {**entry.volume_roles, **value}
+            elif field_name == "details":
+                # Merge details but respect locks on nested detail keys via
+                # legacy character field names stored in field_locks.
+                merged = {**entry.details}
+                for dk, dv in value.items():
+                    mapped = _LOCK_TO_ENTRY.get(dk, dk)
+                    if entry.is_locked(dk) or entry.is_locked(mapped):
+                        result.skipped_locked_fields.append(f"entity:{entry.id}.{dk}")
+                        continue
+                    merged[dk] = dv
+                value = merged
+            if getattr(entry, field_name) != value:
+                setattr(entry, field_name, value)
                 changed = True
         return changed
 
     @staticmethod
     def _merge_relationship(
-        relationship: EntityRelationship,
+        relationship: PlanningRelationship,
         proposal: RelationshipProposal,
         result: ReconcileResult,
     ) -> bool:
         changed = False
         for field_name, value in proposal.model_dump(exclude_none=True).items():
-            if field_name == "id":
+            if field_name in {"id", "source_entity_id", "target_entity_id"}:
                 continue
+            if field_name == "source_id":
+                field_name = "source_id"
             if relationship.is_locked(field_name):
                 result.skipped_locked_fields.append(
                     f"relationship:{relationship.id}.{field_name}"
                 )
                 continue
-            if getattr(relationship, field_name) != value:
+            if getattr(relationship, field_name, None) != value:
                 setattr(relationship, field_name, value)
                 changed = True
+        src = proposal.resolved_source_id()
+        tgt = proposal.resolved_target_id()
+        if src and relationship.source_id != src:
+            if not relationship.is_locked("source_id"):
+                relationship.source_id = src
+                changed = True
+        if tgt and relationship.target_id != tgt:
+            if not relationship.is_locked("target_id"):
+                relationship.target_id = tgt
+                changed = True
         return changed
+
+
+EntityNetworkService = PlanningCodexService

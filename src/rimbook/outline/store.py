@@ -144,7 +144,13 @@ class OutlineStore:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             return None
-        return VolumeBeatData(**raw)
+        data = VolumeBeatData(**raw)
+        # Legacy step numbers: 2=beats, 3=assembled → new 3/4
+        if data.step == 2:
+            data.step = 3
+        elif data.step == 3 and data.chapter_map:
+            data.step = 4
+        return data
 
     def delete_volume_beats(self, volume_number: int) -> bool:
         """Remove the beats file for a volume. Returns False if it didn't exist."""

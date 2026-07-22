@@ -49,7 +49,7 @@
             >
               <span class="ai-hero-icon"><el-icon :size="22"><MagicStick /></el-icon></span>
               <span class="ai-hero-body">
-                <span class="ai-hero-title">生成梗概</span>
+                <span class="ai-hero-title">生成项目基础设定</span>
                 <span class="ai-hero-desc">从创意出发，生成全书故事骨架</span>
               </span>
               <el-icon v-if="generating" class="is-loading ai-hero-loading"><Loading /></el-icon>
@@ -299,7 +299,7 @@
         </div>
       </el-tab-pane>
 
-      <el-tab-pane label="幕后实体" name="entities" lazy>
+      <el-tab-pane label="完整设定集" name="entities" lazy>
         <PlanningEntities />
       </el-tab-pane>
       <el-tab-pane label="线索账本" name="threads" lazy>
@@ -316,20 +316,44 @@
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="showSynopsisDialog" :title="synopsisOverwrite ? '重新生成全书梗概' : '生成全书梗概'" width="500px">
+    <el-dialog v-model="showSynopsisDialog" :title="synopsisOverwrite ? '重新生成项目基础设定' : '生成项目基础设定'" width="560px">
       <el-alert
         v-if="synopsisOverwrite"
         type="warning"
         :closable="false"
         show-icon
-        title="将覆盖当前已有梗概"
+        title="将覆盖当前宏观梗概，并增量补充完整设定集"
         style="margin-bottom: 12px"
       />
+      <p class="foundation-hint">
+        将先生成宏观梗概与粗略设定，再按世界观 → 时间线 → 势力 → 地点 → 角色 → 物品逐层细化详情。
+        每层即时保存，单条失败不会丢失已完成内容。
+      </p>
+      <div class="world-budget">
+        <div class="world-budget-title">
+          <span>世界规模</span>
+          <el-tag size="small" effect="plain">{{ expansionBudgetInfo.cost }}</el-tag>
+        </div>
+        <el-radio-group v-model="expansionCoefficient" class="world-budget-options">
+          <el-radio-button :value="1">1 · 核心世界</el-radio-button>
+          <el-radio-button :value="2">2 · 邻域扩展</el-radio-button>
+          <el-radio-button :value="3">3 · 区域世界</el-radio-button>
+          <el-radio-button :value="4">4 · 宏大世界</el-radio-button>
+        </el-radio-group>
+        <p>{{ expansionBudgetInfo.description }}</p>
+        <el-alert
+          v-if="expansionCoefficient === 4"
+          type="warning"
+          :closable="false"
+          title="宏大世界最多递归三层，模型调用与生成时间会显著增加。"
+        />
+      </div>
       <el-input v-model="premiseText" type="textarea" :rows="6" placeholder="输入小说创意/核心设定…" />
+      <div v-if="foundationProgress" class="foundation-progress">{{ foundationProgress }}</div>
       <template #footer>
-        <el-button @click="showSynopsisDialog = false">取消</el-button>
+        <el-button @click="showSynopsisDialog = false" :disabled="generating">取消</el-button>
         <el-button type="primary" @click="doGenerateSynopsis" :loading="generating">
-          <el-icon><MagicStick /></el-icon> {{ synopsisOverwrite ? '覆盖并生成' : '生成' }}
+          <el-icon><MagicStick /></el-icon> {{ synopsisOverwrite ? '覆盖并生成' : '生成项目基础设定' }}
         </el-button>
       </template>
     </el-dialog>
@@ -341,7 +365,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/project'
 import {
-  getSynopsis, updateSynopsis, generateSynopsis as apiGenerateSynopsis,
+  getSynopsis, updateSynopsis, generateFoundationSSE,
   listVolumes, planVolume, updateVolume, deleteVolume,
   listChapters, planChapter, updateChapter, regenerateChapter, deleteChapter,
   planVolumeSSE, assembleVolumeSSE, getVolumePlanStatus,
@@ -360,10 +384,10 @@ const localBusy = ref(false)
 const generating = computed(() => localBusy.value || store.volumePlan.active)
 const volumePlan = computed(() => store.volumePlan)
 const planSteps = [
-  { num: 0, label: '同步实体' },
-  { num: 1, label: '卷规划' },
-  { num: 2, label: 'Beat 链' },
-  { num: 3, label: '细化组装' },
+  { num: 1, label: '卷大纲' },
+  { num: 2, label: '设定扩充' },
+  { num: 3, label: 'Beat 链' },
+  { num: 4, label: '细化组装' },
 ]
 const deleting = ref(false)
 const mainTab = ref('outline')
@@ -395,6 +419,17 @@ const editingChapter = ref<ChapterOutline | null>(null)
 const showSynopsisDialog = ref(false)
 const premiseText = ref('')
 const synopsisOverwrite = ref(false)
+const foundationProgress = ref('')
+const expansionCoefficient = ref(1)
+const expansionBudgetInfo = computed(() => {
+  const presets: Record<number, { cost: string; description: string }> = {
+    1: { cost: '当前成本', description: '保持当前流程，不递归扩展隐含人物与地点。' },
+    2: { cost: '最多 +12 条', description: '从核心设定向外扩展一层，优先关键人物与关系节点。' },
+    3: { cost: '最多 +28 条', description: '递归两层，形成较完整的区域社会、历史与人物网络。' },
+    4: { cost: '最多 +55 条', description: '递归三层，生成高密度世界网络，适合长篇大型项目。' },
+  }
+  return presets[expansionCoefficient.value] || presets[1]
+})
 
 const beatPanelRef = ref<InstanceType<typeof VolumeBeatPanel> | null>(null)
 let planSseHandle: PlanSSEHandle | null = null
@@ -420,15 +455,17 @@ function wireVolumePlanHandlers(opts?: { onDoneExtra?: () => void | Promise<void
         if (data.status === 'running') {
           const defaults: Record<number, string> = {
             1: '正在生成卷大纲与结局…',
-            2: '正在生成连续 beat 链…',
-            3: '正在细化并组装章节…',
+            2: '正在扩充本卷出场设定…',
+            3: '正在生成连续 beat 链…',
+            4: '正在细化并组装章节…',
           }
           store.patchVolumePlan({ message: defaults[data.step] || store.volumePlan.message })
         } else if (data.status === 'done') {
           const defaults: Record<number, string> = {
             1: '卷大纲已生成',
-            2: 'Beat 链已生成',
-            3: '章节组装完成',
+            2: '本卷设定扩充完成',
+            3: 'Beat 链已生成',
+            4: '章节组装完成',
           }
           store.patchVolumePlan({ message: defaults[data.step] || store.volumePlan.message })
         }
@@ -612,8 +649,8 @@ async function generateSynopsis() {
   if (existing) {
     try {
       await ElMessageBox.confirm(
-        '当前已有全书梗概。继续生成将用新内容覆盖现有梗概，此操作不可撤销。',
-        '覆盖现有梗概？',
+        '当前已有宏观梗概。继续将覆盖梗概，并增量补充完整设定集。',
+        '覆盖并生成项目基础设定？',
         {
           type: 'warning',
           confirmButtonText: '继续生成',
@@ -626,8 +663,8 @@ async function generateSynopsis() {
   } else {
     try {
       await ElMessageBox.confirm(
-        '将根据你输入的创意，由 AI 生成全书梗概。是否继续？',
-        '生成全书梗概',
+        '将根据创意生成宏观梗概、完整设定集与详情；世界规模高于 1 时会继续自动扩展关系网络。是否继续？',
+        '生成项目基础设定',
         {
           type: 'info',
           confirmButtonText: '继续',
@@ -641,19 +678,45 @@ async function generateSynopsis() {
   synopsisOverwrite.value = !!(synopsisText.value || '').trim()
   showSynopsisDialog.value = true
   premiseText.value = ''
+  foundationProgress.value = ''
 }
 
 async function doGenerateSynopsis() {
   if (!store.currentId) return
   localBusy.value = true
+  foundationProgress.value = '准备中…'
   try {
-    const r = await apiGenerateSynopsis(store.currentId, premiseText.value)
+    await new Promise<void>((resolve, reject) => {
+      generateFoundationSSE(store.currentId, premiseText.value, {
+        onProgress: (message) => {
+          foundationProgress.value = message
+        },
+        onStep: (data) => {
+          foundationProgress.value = data.message as string || `步骤 ${data.step} ${data.status}`
+          if (data.step === 1 && data.status === 'done') {
+            // Refresh synopsis text after step 1
+            getSynopsis(store.currentId).then(r => { synopsisText.value = r.text }).catch(() => {})
+          }
+        },
+        onError: (msg) => reject(new Error(msg)),
+        onDone: () => resolve(),
+      }, expansionCoefficient.value)
+    })
+    const r = await getSynopsis(store.currentId)
     synopsisText.value = r.text
     showSynopsisDialog.value = false
     editing.value = 'synopsis'
-    ElMessage.success('梗概已生成')
-  } catch (e: any) { ElMessage.error(e?.response?.data?.detail || '生成失败') }
-  finally { localBusy.value = false }
+    ElMessage.success({
+      message: '项目基础设定已生成。可前往「完整设定集」查看条目。',
+      duration: 4000,
+    })
+    mainTab.value = 'entities'
+  } catch (e: any) {
+    ElMessage.error(e?.message || e?.response?.data?.detail || '生成失败')
+  } finally {
+    localBusy.value = false
+    foundationProgress.value = ''
+  }
 }
 
 async function confirmAddVolume() {
@@ -663,8 +726,8 @@ async function confirmAddVolume() {
     : 1
   try {
     await ElMessageBox.confirm(
-      `将由 AI 规划第 ${nextNum} 卷：\n① 生成卷大纲与结局\n② 生成连续叙事 beat 链\n③ 细化 beat 并组装为章节\n\n全流程约需 1-2 分钟，完成后你可以编辑 beat 再重新组装。是否继续？`,
-      '规划新卷（v2 管线）',
+      `将由 AI 规划第 ${nextNum} 卷：\n① 卷大纲\n② 本卷设定扩充\n③ 连续 Beat 链\n④ 章节细化组装\n\n全流程约需 1-2 分钟，完成后你可以编辑 beat 再重新组装。是否继续？`,
+      '规划新卷（四步管线）',
       {
         type: 'info',
         confirmButtonText: '开始规划',
@@ -1220,6 +1283,56 @@ onUnmounted(() => {
   line-height: 1.9;
   font-family: var(--rb-font);
 }
+
+.foundation-hint {
+  margin: 0 0 12px;
+  color: var(--rb-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.foundation-progress {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--rb-bg-subtle);
+  color: var(--rb-primary);
+  font-size: 13px;
+}
+
+.world-budget {
+  margin: 0 0 14px;
+  padding: 13px;
+  border: 1px solid var(--rb-border-light);
+  border-radius: 10px;
+  background: var(--rb-bg-subtle);
+}
+.world-budget-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+.world-budget-options {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  width: 100%;
+}
+.world-budget-options :deep(.el-radio-button__inner) {
+  width: 100%;
+  border: 1px solid var(--rb-border-light) !important;
+  border-radius: 7px !important;
+  box-shadow: none !important;
+}
+.world-budget p {
+  margin: 10px 0 0;
+  color: var(--rb-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.world-budget .el-alert { margin-top: 10px; }
 
 /* ===== Beat Section ===== */
 .beats-section {
