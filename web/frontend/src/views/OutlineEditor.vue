@@ -7,6 +7,36 @@
       </h1>
     </div>
 
+    <!-- Persistent foundation progress (survives tab switches) -->
+    <div
+      v-if="foundationPlan.active || (foundationPlan.step > 0 && foundationPlan.status === 'running')"
+      class="plan-banner foundation-banner"
+    >
+      <div class="plan-banner-steps">
+        <div
+          v-for="s in foundationBannerSteps"
+          :key="s.num"
+          class="plan-banner-step"
+          :class="{
+            active: foundationBannerStep === s.num && foundationPlan.active,
+            done: foundationBannerStep > s.num,
+          }"
+        >
+          <span class="plan-banner-dot">
+            <el-icon v-if="foundationBannerStep === s.num && foundationPlan.active" class="is-loading"><Loading /></el-icon>
+            <el-icon v-else-if="foundationBannerStep > s.num"><Check /></el-icon>
+            <template v-else>{{ s.num }}</template>
+          </span>
+          <span>{{ s.label }}</span>
+        </div>
+      </div>
+      <div class="plan-banner-msg">
+        <el-icon class="is-loading"><Loading /></el-icon>
+        <span>{{ foundationPlan.message || '正在生成项目基础设定…' }}</span>
+        <span class="plan-banner-vol">基础设定</span>
+      </div>
+    </div>
+
     <!-- Persistent volume-plan progress (survives tab switches) -->
     <div v-if="volumePlan.active || (volumePlan.step > 0 && volumePlan.status === 'running')" class="plan-banner">
       <div class="plan-banner-steps">
@@ -349,7 +379,6 @@
         />
       </div>
       <el-input v-model="premiseText" type="textarea" :rows="6" placeholder="输入小说创意/核心设定…" />
-      <div v-if="foundationProgress" class="foundation-progress">{{ foundationProgress }}</div>
       <template #footer>
         <el-button @click="showSynopsisDialog = false" :disabled="generating">取消</el-button>
         <el-button type="primary" @click="doGenerateSynopsis" :loading="generating">
@@ -365,7 +394,7 @@ import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/project'
 import {
-  getSynopsis, updateSynopsis, generateFoundationSSE,
+  getSynopsis, updateSynopsis, generateFoundationSSE, getFoundationStatus,
   listVolumes, planVolume, updateVolume, deleteVolume,
   listChapters, planChapter, updateChapter, regenerateChapter, deleteChapter,
   planVolumeSSE, assembleVolumeSSE, getVolumePlanStatus,
@@ -381,14 +410,41 @@ const store = useProjectStore()
 const route = useRoute()
 const router = useRouter()
 const localBusy = ref(false)
-const generating = computed(() => localBusy.value || store.volumePlan.active)
+const generating = computed(() =>
+  localBusy.value || store.volumePlan.active || store.foundationPlan.active,
+)
 const volumePlan = computed(() => store.volumePlan)
+const foundationPlan = computed(() => store.foundationPlan)
 const planSteps = [
   { num: 1, label: '卷大纲' },
   { num: 2, label: '设定扩充' },
   { num: 3, label: 'Beat 链' },
   { num: 4, label: '细化组装' },
 ]
+
+function bannerStepFromRaw(step: number, coefficient: number): number {
+  if (step <= 0) return 1
+  if (step === 1) return 1
+  if (step === 2) return 2
+  if (step >= 9 && coefficient > 1) return 4
+  return 3
+}
+
+const foundationBannerSteps = computed(() => {
+  const steps = [
+    { num: 1, label: '宏观梗概' },
+    { num: 2, label: '设定集初始化' },
+    { num: 3, label: '分层详情' },
+  ]
+  if (foundationPlan.value.expansionCoefficient > 1) {
+    steps.push({ num: 4, label: '世界扩展' })
+  }
+  return steps
+})
+
+const foundationBannerStep = computed(() =>
+  bannerStepFromRaw(foundationPlan.value.step, foundationPlan.value.expansionCoefficient),
+)
 const deleting = ref(false)
 const mainTab = ref('outline')
 
@@ -419,8 +475,8 @@ const editingChapter = ref<ChapterOutline | null>(null)
 const showSynopsisDialog = ref(false)
 const premiseText = ref('')
 const synopsisOverwrite = ref(false)
-const foundationProgress = ref('')
 const expansionCoefficient = ref(1)
+let foundationSseHandle: PlanSSEHandle | null = null
 const expansionBudgetInfo = computed(() => {
   const presets: Record<number, { cost: string; description: string }> = {
     1: { cost: '当前成本', description: '保持当前流程，不递归扩展隐含人物与地点。' },
@@ -678,45 +734,108 @@ async function generateSynopsis() {
   synopsisOverwrite.value = !!(synopsisText.value || '').trim()
   showSynopsisDialog.value = true
   premiseText.value = ''
-  foundationProgress.value = ''
+}
+
+function wireFoundationPlanHandlers() {
+  return {
+    onProgress: (msg: string) => {
+      store.patchFoundationPlan({ message: msg, active: true, status: 'running' })
+    },
+    onStep: (data: {
+      step: number
+      status: string
+      phase?: string
+      message?: string
+      entry_type?: string
+      current?: number
+      total?: number
+      expansion_coefficient?: number
+    }) => {
+      store.applyFoundationPlanStep({
+        ...data,
+        message: data.message
+          || (data.status === 'running'
+            ? `步骤 ${data.step} 进行中…`
+            : data.status === 'done'
+              ? `步骤 ${data.step} 完成`
+              : ''),
+      })
+      if (data.step === 1 && data.status === 'done' && store.currentId) {
+        getSynopsis(store.currentId).then(r => { synopsisText.value = r.text }).catch(() => {})
+      }
+    },
+    onError: (msg: string) => {
+      store.finishFoundationPlan({ error: msg })
+      ElMessage.error(msg)
+    },
+    onDone: async () => {
+      store.finishFoundationPlan()
+      if (store.currentId) {
+        try {
+          const r = await getSynopsis(store.currentId)
+          synopsisText.value = r.text
+        } catch { /* ignore */ }
+      }
+      editing.value = 'synopsis'
+      ElMessage.success({
+        message: '项目基础设定已生成。可前往「完整设定集」查看条目。',
+        duration: 4000,
+      })
+      mainTab.value = 'entities'
+    },
+  }
+}
+
+function attachFoundationPlanSse(opts?: { resume?: boolean; premise?: string; coefficient?: number }) {
+  if (!store.currentId) return
+  foundationSseHandle?.close()
+  const handlers = wireFoundationPlanHandlers()
+  const resume = !!opts?.resume
+  foundationSseHandle = generateFoundationSSE(
+    store.currentId,
+    opts?.premise || '',
+    handlers,
+    opts?.coefficient ?? store.foundationPlan.expansionCoefficient,
+    { resume },
+  )
+  store.bindFoundationPlanSse(foundationSseHandle)
+}
+
+async function resumeFoundationPlanIfNeeded() {
+  if (!store.currentId) return
+  try {
+    const st = await getFoundationStatus(store.currentId)
+    if (!st.active) return
+    const coefficient = st.expansion_coefficient
+      ?? st.step?.expansion_coefficient
+      ?? store.foundationPlan.expansionCoefficient
+      ?? 1
+    store.startFoundationPlanTracking({
+      message: st.progress || '恢复进度…',
+      expansionCoefficient: coefficient,
+    })
+    if (st.step) store.applyFoundationPlanStep(st.step)
+    attachFoundationPlanSse({ resume: true, coefficient })
+  } catch { /* ignore */ }
+}
+
+function onFoundationPlanResume() {
+  void resumeFoundationPlanIfNeeded()
 }
 
 async function doGenerateSynopsis() {
   if (!store.currentId) return
-  localBusy.value = true
-  foundationProgress.value = '准备中…'
-  try {
-    await new Promise<void>((resolve, reject) => {
-      generateFoundationSSE(store.currentId, premiseText.value, {
-        onProgress: (message) => {
-          foundationProgress.value = message
-        },
-        onStep: (data) => {
-          foundationProgress.value = data.message as string || `步骤 ${data.step} ${data.status}`
-          if (data.step === 1 && data.status === 'done') {
-            // Refresh synopsis text after step 1
-            getSynopsis(store.currentId).then(r => { synopsisText.value = r.text }).catch(() => {})
-          }
-        },
-        onError: (msg) => reject(new Error(msg)),
-        onDone: () => resolve(),
-      }, expansionCoefficient.value)
-    })
-    const r = await getSynopsis(store.currentId)
-    synopsisText.value = r.text
-    showSynopsisDialog.value = false
-    editing.value = 'synopsis'
-    ElMessage.success({
-      message: '项目基础设定已生成。可前往「完整设定集」查看条目。',
-      duration: 4000,
-    })
-    mainTab.value = 'entities'
-  } catch (e: any) {
-    ElMessage.error(e?.message || e?.response?.data?.detail || '生成失败')
-  } finally {
-    localBusy.value = false
-    foundationProgress.value = ''
-  }
+  const premise = premiseText.value
+  const coefficient = expansionCoefficient.value
+  store.startFoundationPlanTracking({
+    message: '准备中…',
+    expansionCoefficient: coefficient,
+  })
+  showSynopsisDialog.value = false
+  attachFoundationPlanSse({
+    premise,
+    coefficient,
+  })
 }
 
 async function confirmAddVolume() {
@@ -922,10 +1041,13 @@ async function saveChapter() {
 onMounted(async () => {
   await fetchData()
   await resumeVolumePlanIfNeeded()
+  await resumeFoundationPlanIfNeeded()
   window.addEventListener('volume-plan-resume', onVolumePlanResume)
+  window.addEventListener('foundation-plan-resume', onFoundationPlanResume)
 })
 onUnmounted(() => {
   window.removeEventListener('volume-plan-resume', onVolumePlanResume)
+  window.removeEventListener('foundation-plan-resume', onFoundationPlanResume)
   // Keep SSE alive in store across remounts — do not abort here.
 })
 </script>
@@ -1289,15 +1411,6 @@ onUnmounted(() => {
   color: var(--rb-text-secondary);
   font-size: 13px;
   line-height: 1.6;
-}
-
-.foundation-progress {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--rb-bg-subtle);
-  color: var(--rb-primary);
-  font-size: 13px;
 }
 
 .world-budget {

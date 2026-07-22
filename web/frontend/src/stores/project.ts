@@ -29,6 +29,19 @@ export interface VolumePlanState {
   error: string | null
 }
 
+export interface FoundationPlanState {
+  active: boolean
+  step: number
+  status: 'idle' | 'running' | 'done'
+  phase: string
+  message: string
+  error: string | null
+  expansionCoefficient: number
+  entryType: string
+  current: number | null
+  total: number | null
+}
+
 export const useProjectStore = defineStore('project', () => {
   const projects = ref<ProjectInfo[]>([])
   const currentId = ref<string>('')
@@ -51,6 +64,21 @@ export const useProjectStore = defineStore('project', () => {
     error: null,
   })
   let volumePlanSse: { close: () => void } | null = null
+
+  // Foundation pipeline (survives tab switches & remounts).
+  const foundationPlan = ref<FoundationPlanState>({
+    active: false,
+    step: 0,
+    status: 'idle',
+    phase: '',
+    message: '',
+    error: null,
+    expansionCoefficient: 1,
+    entryType: '',
+    current: null,
+    total: null,
+  })
+  let foundationPlanSse: { close: () => void } | null = null
 
   const currentProject = computed(() =>
     projects.value.find(p => p.id === currentId.value)
@@ -139,6 +167,102 @@ export const useProjectStore = defineStore('project', () => {
       })
     } else {
       patchVolumePlan({
+        active: false,
+        status: 'done',
+        phase: '',
+        error: null,
+        message: '完成',
+      })
+    }
+  }
+
+  function patchFoundationPlan(patch: Partial<FoundationPlanState>) {
+    foundationPlan.value = { ...foundationPlan.value, ...patch }
+  }
+
+  function resetFoundationPlan() {
+    foundationPlanSse?.close()
+    foundationPlanSse = null
+    foundationPlan.value = {
+      active: false,
+      step: 0,
+      status: 'idle',
+      phase: '',
+      message: '',
+      error: null,
+      expansionCoefficient: 1,
+      entryType: '',
+      current: null,
+      total: null,
+    }
+  }
+
+  function applyFoundationPlanStep(data: {
+    step?: number
+    status?: string
+    phase?: string
+    message?: string
+    entry_type?: string
+    current?: number
+    total?: number
+    expansion_coefficient?: number
+  }) {
+    patchFoundationPlan({
+      active: true,
+      step: data.step ?? foundationPlan.value.step,
+      status: (data.status as FoundationPlanState['status']) || foundationPlan.value.status,
+      phase: data.phase ?? foundationPlan.value.phase,
+      message: data.message || foundationPlan.value.message,
+      entryType: data.entry_type ?? foundationPlan.value.entryType,
+      current: data.current ?? foundationPlan.value.current,
+      total: data.total ?? foundationPlan.value.total,
+      expansionCoefficient:
+        data.expansion_coefficient
+        ?? foundationPlan.value.expansionCoefficient,
+    })
+  }
+
+  function bindFoundationPlanSse(handle: { close: () => void }) {
+    foundationPlanSse?.close()
+    foundationPlanSse = {
+      close: () => {
+        handle.close()
+        foundationPlanSse = null
+      },
+    }
+  }
+
+  function startFoundationPlanTracking(opts: {
+    message?: string
+    expansionCoefficient?: number
+  }) {
+    patchFoundationPlan({
+      active: true,
+      step: 1,
+      status: 'running',
+      phase: '',
+      message: opts.message || '准备中…',
+      error: null,
+      expansionCoefficient: opts.expansionCoefficient ?? 1,
+      entryType: '',
+      current: null,
+      total: null,
+    })
+  }
+
+  function finishFoundationPlan(opts?: { error?: string }) {
+    foundationPlanSse?.close()
+    foundationPlanSse = null
+    if (opts?.error) {
+      patchFoundationPlan({
+        active: false,
+        status: 'idle',
+        phase: '',
+        error: opts.error,
+        message: opts.error,
+      })
+    } else {
+      patchFoundationPlan({
         active: false,
         status: 'done',
         phase: '',
@@ -248,6 +372,12 @@ export const useProjectStore = defineStore('project', () => {
             detail: { op: t.op, volume: t.chapter },
           }))
         }
+        if (t.op === 'foundation') {
+          startFoundationPlanTracking({
+            message: t.progress || '恢复进度…',
+          })
+          window.dispatchEvent(new CustomEvent('foundation-plan-resume'))
+        }
       }
     } catch { /* no-op */ }
   }
@@ -293,9 +423,12 @@ export const useProjectStore = defineStore('project', () => {
   return {
     projects, currentId, status, loading, currentProject, writeTasks,
     volumePlan,
+    foundationPlan,
     fetchProjects, createNew, removeProject, fetchStatus, selectProject,
     startWriteTracking, stopWriteTracking, updateWriteStream, checkPendingTasks,
     patchVolumePlan, resetVolumePlan, applyVolumePlanStep,
     startVolumePlanTracking, finishVolumePlan, bindVolumePlanSse,
+    patchFoundationPlan, resetFoundationPlan, applyFoundationPlanStep,
+    startFoundationPlanTracking, finishFoundationPlan, bindFoundationPlanSse,
   }
 })

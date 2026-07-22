@@ -570,15 +570,17 @@ export function planVolumeSSE(
   return { close: () => ctrl.abort() }
 }
 
-/** Two-step foundation: macro synopsis + full planning codex (SSE). */
+/** Foundation pipeline: synopsis + codex + detail layers (reconnectable SSE). */
 export function generateFoundationSSE(
   projectId: string,
   premise: string,
   handlers: PlanSSEHandlers,
   expansionCoefficient = 1,
+  opts?: { resume?: boolean },
 ): PlanSSEHandle {
   const ctrl = new AbortController()
-  const url = `/api/projects/${projectId}/outline/foundation`
+  const qs = opts?.resume ? '?resume=1' : ''
+  const url = `/api/projects/${projectId}/outline/foundation${qs}`
 
   ;(async () => {
     try {
@@ -652,6 +654,28 @@ export interface VolumePlanStatus {
 
 export const getVolumePlanStatus = (projectId: string) =>
   http.get<VolumePlanStatus>(`/projects/${projectId}/outline/volumes/plan-status`).then(r => r.data)
+
+export interface FoundationStatus {
+  active: boolean
+  finished: boolean
+  progress: string
+  step: {
+    step?: number
+    status?: string
+    phase?: string
+    message?: string
+    entry_type?: string
+    current?: number
+    total?: number
+    expansion_coefficient?: number
+  } | null
+  error: string | null
+  expansion_coefficient: number | null
+  started_at?: string | null
+}
+
+export const getFoundationStatus = (projectId: string) =>
+  http.get<FoundationStatus>(`/projects/${projectId}/outline/foundation-status`).then(r => r.data)
 
 /** Shared SSE stream reader for plan/assemble endpoints. */
 async function _readSSEStream(res: Response, handlers: PlanSSEHandlers) {

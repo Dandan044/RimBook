@@ -157,87 +157,250 @@ def generate_synopsis(req: SynopsisIn, deps: ProjectDeps = Depends(get_project_d
 def generate_foundation_sse(
     project_id: str,
     req: FoundationIn,
+    resume: bool = False,
     deps: ProjectDeps = Depends(get_project_deps),
 ) -> EventSourceResponse:
-    """Foundation SSE: synopsis, rough codex, then six detail layers."""
-    import threading
+    """Foundation SSE: synopsis, rough codex, detail layers; reconnectable."""
+    if resume:
+        active = task_registry.get(project_id, "foundation", None)
+        if active is None or active.finished:
+            async def no_job():
+                yield sse_event("error", {"message": "没有进行中的基础设定任务"})
+                yield sse_done()
+            return EventSourceResponse(no_job(), ping=10)
+        return _foundation_pipeline_sse(project_id)
 
+    coefficient = (
+        req.expansion_coefficient
+        if req.expansion_coefficient is not None
+        else deps.config.world_expansion.coefficient
+    )
     started = task_registry.try_start(
         project_id, "foundation", None, "正在生成项目基础设定…"
     )
+    if started:
+        _spawn_foundation_worker(project_id, req.text, coefficient, deps)
+    return _foundation_pipeline_sse(project_id)
+
+
+def _spawn_foundation_worker(
+    project_id: str,
+    premise: str,
+    coefficient: int,
+    deps: ProjectDeps,
+) -> None:
+    import json
+    import threading
+    import time
 
     def _run() -> None:
         try:
-            coefficient = (
-                req.expansion_coefficient
-                if req.expansion_coefficient is not None
-                else deps.config.world_expansion.coefficient
+            task_registry.update(
+                project_id, "foundation", "正在生成项目基础设定…", None,
+            )
+            # Seed snapshot so resume clients know expansion coefficient early.
+            task_registry.set_stream(
+                project_id,
+                "foundation",
+                None,
+                json.dumps(
+                    {
+                        "step": 0,
+                        "status": "running",
+                        "message": "正在生成项目基础设定…",
+                        "expansion_coefficient": coefficient,
+                    },
+                    ensure_ascii=False,
+                ),
             )
             for event in deps.planner.plan_foundation(
-                req.text,
+                premise,
                 expansion_coefficient=coefficient,
             ):
                 kind = event["event"]
                 data = event["data"]
-                if kind in {"step", "progress"}:
+                if kind == "step":
                     msg = data.get("message") or f"Step {data.get('step')}"
                     task_registry.update(project_id, "foundation", msg, None)
-                    # update() already broadcasts progress; step needs its
-                    # structured payload as a separate named event.
-                    if kind == "step":
-                        task_registry.publish(
-                            project_id, "foundation", None, kind, data
-                        )
+                    # Snapshot for reconnect (omit bulky reconcile payload).
+                    snap = {k: v for k, v in data.items() if k != "changes"}
+                    snap["expansion_coefficient"] = coefficient
+                    if not snap.get("message"):
+                        step_n = snap.get("step")
+                        status = snap.get("status")
+                        if status == "running":
+                            snap["message"] = f"步骤 {step_n} 进行中…"
+                        elif status == "done":
+                            snap["message"] = f"步骤 {step_n} 完成"
+                    task_registry.set_stream(
+                        project_id,
+                        "foundation",
+                        None,
+                        json.dumps(snap, ensure_ascii=False),
+                    )
+                    task_registry.publish(
+                        project_id, "foundation", None, kind, data,
+                    )
+                elif kind == "progress":
+                    msg = data.get("message", "") if isinstance(data, dict) else str(data)
+                    if msg:
+                        # update() already fans out progress — don't double-publish.
+                        task_registry.update(project_id, "foundation", msg, None)
+                else:
+                    task_registry.publish(
+                        project_id, "foundation", None, kind, data,
+                    )
             task_registry.publish(project_id, "foundation", None, "done", {})
             task_registry.mark_finished(project_id, "foundation", None)
         except Exception as exc:  # noqa: BLE001
-            task_registry.publish(project_id, "foundation", None, "error", {"message": str(exc)})
-            task_registry.mark_finished(project_id, "foundation", None, error=str(exc))
+            task_registry.publish(
+                project_id, "foundation", None, "error", {"message": str(exc)},
+            )
+            task_registry.mark_finished(
+                project_id, "foundation", None, error=str(exc),
+            )
+        finally:
+            def _cleanup() -> None:
+                time.sleep(120)
+                t = task_registry.get(project_id, "foundation", None)
+                if t is not None and t.finished:
+                    task_registry.unregister(project_id, "foundation", None)
 
-    if started:
-        threading.Thread(
-            target=_run,
-            name=f"foundation-{project_id}",
-            daemon=True,
-        ).start()
+            threading.Thread(
+                target=_cleanup,
+                name=f"foundation-cleanup-{project_id}",
+                daemon=True,
+            ).start()
 
-    async def event_stream():
-        sub = task_registry.subscribe(project_id, "foundation", None)
-        if sub is None:
+    threading.Thread(
+        target=_run,
+        name=f"foundation-{project_id}",
+        daemon=True,
+    ).start()
+
+
+def _foundation_pipeline_sse(project_id: str) -> EventSourceResponse:
+    """Attach SSE subscriber to an in-flight foundation job."""
+    from queue import Empty
+    import json
+
+    sub = task_registry.subscribe(project_id, "foundation", None)
+    if sub is None:
+        async def no_job():
             yield sse_event("error", {"message": "无法订阅基础设定任务"})
             yield sse_done()
-            return
-        event_q, _, _, already_finished = sub
-        from queue import Empty
-        if already_finished:
-            yield sse_done()
-            return
-        while True:
-            try:
-                kind, payload = await asyncio.to_thread(event_q.get, True, 0.25)
-            except Empty:
+        return EventSourceResponse(no_job(), ping=10)
+
+    event_q, snapshot_text, snapshot_progress, already_finished = sub
+
+    async def event_stream():
+        try:
+            if snapshot_progress:
+                yield sse_progress(snapshot_progress)
+            if snapshot_text:
+                try:
+                    snap = json.loads(snapshot_text)
+                    yield sse_event("step", snap)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            if already_finished:
                 t = task_registry.get(project_id, "foundation", None)
-                if t is None or t.finished:
-                    yield sse_done()
-                    return
-                continue
-            if kind == "__end__":
-                yield sse_done()
-                return
-            if kind == "step":
-                yield sse_event("step", payload)
-            elif kind == "progress":
-                msg = payload.get("message", "") if isinstance(payload, dict) else str(payload)
-                yield sse_progress(msg)
-            elif kind == "error":
-                yield sse_event("error", payload)
-                yield sse_done()
-                return
-            elif kind == "done":
-                yield sse_done(payload if isinstance(payload, dict) else {})
+                if t is not None and t.error:
+                    yield sse_event("error", {"message": t.error})
+                else:
+                    yield sse_done({})
                 return
 
-    return EventSourceResponse(event_stream(), ping=10)
+            while True:
+                try:
+                    kind, payload = await asyncio.to_thread(event_q.get, True, 0.25)
+                except Empty:
+                    t = task_registry.get(project_id, "foundation", None)
+                    if t is None or t.finished:
+                        t = task_registry.get(project_id, "foundation", None)
+                        if t is not None and t.error:
+                            yield sse_event("error", {"message": t.error})
+                        yield sse_done({})
+                        return
+                    continue
+
+                if kind == "__end__":
+                    t = task_registry.get(project_id, "foundation", None)
+                    if t is not None and t.error:
+                        yield sse_event("error", {"message": t.error})
+                    yield sse_done({})
+                    return
+
+                if kind == "progress":
+                    msg = (
+                        payload.get("message", "")
+                        if isinstance(payload, dict)
+                        else str(payload)
+                    )
+                    yield sse_progress(msg)
+                elif kind == "step":
+                    yield sse_event("step", payload)
+                elif kind == "error":
+                    msg = (
+                        payload.get("message", str(payload))
+                        if isinstance(payload, dict)
+                        else str(payload)
+                    )
+                    yield sse_event("error", {"message": msg})
+                    yield sse_done()
+                    return
+                elif kind == "done":
+                    yield sse_done(payload if isinstance(payload, dict) else {})
+                    return
+        except asyncio.CancelledError:
+            return
+        finally:
+            task_registry.unsubscribe(project_id, "foundation", None, event_q)
+
+    return EventSourceResponse(
+        event_stream(),
+        ping=10,
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/foundation-status")
+def foundation_status(project_id: str) -> dict:
+    """Return the active (or recently finished) foundation job for this project."""
+    import json
+
+    active = task_registry.get(project_id, "foundation", None)
+    if active is None:
+        return {
+            "active": False,
+            "finished": False,
+            "progress": "",
+            "step": None,
+            "error": None,
+            "expansion_coefficient": None,
+            "started_at": None,
+        }
+    step = None
+    expansion_coefficient = None
+    if active.stream_text:
+        try:
+            step = json.loads(active.stream_text)
+            if isinstance(step, dict):
+                expansion_coefficient = step.get("expansion_coefficient")
+        except (json.JSONDecodeError, TypeError):
+            step = None
+    return {
+        "active": not active.finished,
+        "finished": active.finished,
+        "progress": active.progress,
+        "step": step,
+        "error": active.error,
+        "expansion_coefficient": expansion_coefficient,
+        "started_at": active.started_at,
+    }
 
 
 # ---- volumes ----
