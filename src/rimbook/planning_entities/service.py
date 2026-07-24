@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -87,6 +88,16 @@ DETAIL_TYPE_ORDER = (
     "location",
     "character",
     "item",
+)
+
+# When truncating render_full, keep higher-priority types first.
+_FULL_RENDER_KEEP_PRIORITY = (
+    "character",
+    "location",
+    "faction",
+    "worldbuilding",
+    "item",
+    "timeline",
 )
 
 
@@ -620,6 +631,151 @@ class PlanningCodexService:
                 f"- 关系 {relation.source_id} → {relation.target_id}"
                 f"（{relation.relationship_type}）：{tension or '待定'}"
             )
+        return "\n".join(lines)
+
+    def render_full(
+        self,
+        entry_ids: list[str] | None = None,
+        *,
+        volume_number: int | None = None,
+        max_chars: int | None = 200_000,
+    ) -> str:
+        """Render full planning-codex entries for framework / outline prompts.
+
+        Unlike :meth:`render_brief`, detail is not truncated per entry. If the
+        total exceeds *max_chars*, lower-priority types are dropped first
+        (timeline → item → … → character).
+        """
+        wanted = set(entry_ids or [])
+        by_type: dict[str, list] = {t: [] for t in DETAIL_TYPE_ORDER}
+        for entry in self.store.list_entries():
+            if wanted and entry.id not in wanted:
+                continue
+            if entry.type in by_type:
+                by_type[entry.type].append(entry)
+
+        # Build blocks in DETAIL_TYPE_ORDER; truncate by keep-priority if needed.
+        type_blocks: list[tuple[str, str]] = []
+        for entry_type in DETAIL_TYPE_ORDER:
+            entries = by_type.get(entry_type) or []
+            if not entries:
+                continue
+            label = _TYPE_LABELS.get(entry_type, entry_type)
+            parts = [f"## {label}"]
+            for entry in entries:
+                parts.append(self._format_entry_full(entry, volume_number=volume_number))
+            type_blocks.append((entry_type, "\n\n".join(parts)))
+
+        all_selected = {
+            e.id
+            for entries in by_type.values()
+            for e in entries
+        }
+        if not all_selected:
+            return "暂无完整设定集条目。"
+
+        rel_lines: list[str] = []
+        for relation in self.store.list_relationships():
+            if relation.source_id not in all_selected or relation.target_id not in all_selected:
+                continue
+            tension = relation.conflict or relation.stakes or relation.status
+            rel_lines.append(
+                f"- 关系 {relation.source_id} → {relation.target_id}"
+                f"（{relation.relationship_type}）：{tension or '待定'}"
+            )
+        relations_block = ""
+        if rel_lines:
+            relations_block = "\n\n## 关系\n" + "\n".join(rel_lines)
+
+        header = "【完整设定集全文（仅供规划，禁止向读者直接泄露幕后字段）】\n\n"
+        if max_chars is None or max_chars <= 0:
+            body = "\n\n".join(block for _, block in type_blocks) + relations_block
+            return header + body
+
+        keep_rank = {t: i for i, t in enumerate(_FULL_RENDER_KEEP_PRIORITY)}
+        ordered = sorted(type_blocks, key=lambda tb: keep_rank.get(tb[0], 99))
+        kept_map: dict[str, str] = {}
+        dropped: list[str] = []
+        used = len(header) + len(relations_block)
+        for entry_type, block in ordered:
+            extra = (2 if kept_map else 0) + len(block)
+            if kept_map and used + extra > max_chars:
+                dropped.append(entry_type)
+                continue
+            if not kept_map and used + len(block) > max_chars:
+                room = max(max_chars - used - 20, 500)
+                kept_map[entry_type] = block[:room] + "\n…（该类型条目已截断）"
+                used = max_chars
+                dropped.append(f"{entry_type}(截断)")
+                break
+            kept_map[entry_type] = block
+            used += extra
+
+        # Restore stable display order.
+        kept_blocks = [
+            kept_map[t] for t in DETAIL_TYPE_ORDER if t in kept_map
+        ]
+        body = "\n\n".join(kept_blocks) + relations_block
+        if dropped:
+            labels = "、".join(
+                _TYPE_LABELS.get(t.replace("(截断)", ""), t) if "(截断)" not in t
+                else f"{_TYPE_LABELS.get(t.replace('(截断)', ''), t)}(截断)"
+                for t in dropped
+            )
+            body += f"\n\n（因篇幅限制，以下类型未完整纳入：{labels}）"
+        return header + body
+
+    def render_entries_full(
+        self,
+        entry_ids: list[str],
+        *,
+        volume_number: int | None = None,
+        max_chars: int | None = 200_000,
+    ) -> str:
+        """Full render restricted to the given entry ids."""
+        if not entry_ids:
+            return "（无涉及实体）"
+        return self.render_full(
+            entry_ids,
+            volume_number=volume_number,
+            max_chars=max_chars,
+        )
+
+    def _format_entry_full(
+        self,
+        entry: PlanningCodexEntry,
+        *,
+        volume_number: int | None = None,
+    ) -> str:
+        type_label = _TYPE_LABELS.get(entry.type, entry.type)
+        lines = [f"### [{type_label}] {entry.id}（{entry.name}）"]
+        if entry.aliases:
+            lines.append(f"- 别名：{'、'.join(entry.aliases)}")
+        if entry.narrative_role:
+            lines.append(f"- 叙事职责：{entry.narrative_role}")
+        if entry.surface_summary:
+            lines.append(f"- 公开面：{entry.surface_summary}")
+        if entry.secret_truth:
+            lines.append(f"- 幕后真相：{entry.secret_truth}")
+        if entry.reveal_strategy:
+            lines.append(f"- 首次登场：{entry.reveal_strategy}")
+        if volume_number is not None:
+            volume_role = entry.volume_roles.get(str(volume_number), "")
+            if volume_role:
+                lines.append(f"- 本卷职责：{volume_role}")
+        if entry.revealed_ref:
+            lines.append(f"- 已揭示关联：{entry.revealed_ref}")
+        if entry.detail:
+            lines.append(f"- 详情：\n{entry.detail}")
+        for key, value in (entry.details or {}).items():
+            if key in {"arc"} or value in (None, "", {}, []):
+                continue
+            if isinstance(value, dict):
+                lines.append(f"- {key}：{json.dumps(value, ensure_ascii=False)}")
+            else:
+                lines.append(f"- {key}：{value}")
+        if entry.body:
+            lines.append(f"- 备注：\n{entry.body}")
         return "\n".join(lines)
 
     def render_index(self, *, max_per_type: int = 40) -> str:

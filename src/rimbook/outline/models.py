@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 __all__ = [
     "MicroScene", "SceneBeat", "RawBeat", "RefinedBeat", "ChapterAssignment",
     "VolumeBeatData", "ChapterOutline", "VolumeOutline", "ChapterSummary",
+    "FrameworkReaderLens", "FrameworkCraftFocus", "FrameworkStage",
+    "FrameworkCastEntry", "VolumeFramework",
 ]
 
 
@@ -96,7 +98,10 @@ class VolumeBeatData(BaseModel):
     """The full beat pipeline state for one volume, stored as volNN.beats.yaml."""
 
     volume: int
-    step: int = Field(default=3, description="Pipeline progress: 3=raw beats done, 4=grouped+microscened.")
+    step: int = Field(
+        default=4,
+        description="Pipeline progress: 4=raw beats done, 5=grouped+microscened.",
+    )
     raw_beats: list[RawBeat] = Field(default_factory=list)
     refined_beats: list[RefinedBeat] = Field(default_factory=list)
     chapter_map: list[ChapterAssignment] = Field(default_factory=list)
@@ -147,6 +152,73 @@ class ChapterSummary(BaseModel):
 
     number: int
     summary: str = ""
+
+
+class FrameworkReaderLens(BaseModel):
+    """Reader-side writing lens for a volume (not a plot outline)."""
+
+    current_perspective: str = ""
+    what_they_want: str = ""
+    reveal_debts: list[str] = Field(default_factory=list)
+
+
+class FrameworkCraftFocus(BaseModel):
+    """Craft priorities for the volume (conflict / reversal / etc.)."""
+
+    conflict: str = ""
+    reversal: str = ""
+    development: str = ""
+    suspense: str = ""
+    other: str = ""
+
+
+class FrameworkStage(BaseModel):
+    """A stage/set that will host drama this volume."""
+
+    id: str
+    why_this_stage: str = ""
+    dramatic_pressure: str = ""
+
+
+class FrameworkCastEntry(BaseModel):
+    """One on-stage entity with detailed dramatic briefing."""
+
+    id: str
+    billing: str = Field(
+        default="supporting",
+        description="lead / supporting / antagonist / cameo / mentioned",
+    )
+    situation: str = ""
+    dramatic_impact: str = ""
+
+
+class VolumeFramework(BaseModel):
+    """Writing framework + detailed cast/stage briefing (volNN.framework.yaml)."""
+
+    volume_number: int
+    reader_lens: FrameworkReaderLens = Field(default_factory=FrameworkReaderLens)
+    craft_focus: FrameworkCraftFocus = Field(default_factory=FrameworkCraftFocus)
+    stages: list[FrameworkStage] = Field(default_factory=list)
+    cast: list[FrameworkCastEntry] = Field(default_factory=list)
+    casting_note: str = ""
+    involved_ids: list[str] = Field(default_factory=list)
+
+    def model_post_init(self, __context: Any) -> None:  # type: ignore[override]
+        if self.volume_number < 1:
+            raise ValueError("volume_number must be >= 1")
+        # Ensure involved_ids covers cast ∪ stages.
+        seen: set[str] = set()
+        merged: list[str] = []
+        for eid in [
+            *self.involved_ids,
+            *(c.id for c in self.cast),
+            *(s.id for s in self.stages),
+        ]:
+            eid = (eid or "").strip()
+            if eid and eid not in seen:
+                seen.add(eid)
+                merged.append(eid)
+        self.involved_ids = merged
 
 
 class VolumeOutline(BaseModel):

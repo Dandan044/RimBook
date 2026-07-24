@@ -156,6 +156,10 @@ class ProjectPaths:
         """Beat pipeline data for a volume (volNN.beats.yaml)."""
         return self.volumes_dir / f"vol{number:02d}.beats.yaml"
 
+    def volume_framework_file(self, number: int) -> Path:
+        """Writing-framework + cast briefing for a volume (volNN.framework.yaml)."""
+        return self.volumes_dir / f"vol{number:02d}.framework.yaml"
+
     # --- prose -----------------------------------------------------------
     @property
     def drafts_dir(self) -> Path:

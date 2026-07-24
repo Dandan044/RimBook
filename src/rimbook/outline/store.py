@@ -21,7 +21,13 @@ import yaml
 
 from ..project import ProjectPaths
 from ..versioning import atomic_write
-from .models import ChapterOutline, SceneBeat, VolumeBeatData, VolumeOutline
+from .models import (
+    ChapterOutline,
+    SceneBeat,
+    VolumeBeatData,
+    VolumeFramework,
+    VolumeOutline,
+)
 
 __all__ = ["OutlineStore"]
 
@@ -145,16 +151,50 @@ class OutlineStore:
         if not isinstance(raw, dict):
             return None
         data = VolumeBeatData(**raw)
-        # Legacy step numbers: 2=beats, 3=assembled → new 3/4
+        # Legacy step numbers after pipeline renumbers:
+        # old: 2=beats, 3=assembled → later 3/4 → now 4/5
         if data.step == 2:
-            data.step = 3
-        elif data.step == 3 and data.chapter_map:
             data.step = 4
+        elif data.step == 3:
+            data.step = 5 if data.chapter_map else 4
+        elif data.step == 4 and data.chapter_map:
+            data.step = 5
         return data
 
     def delete_volume_beats(self, volume_number: int) -> bool:
         """Remove the beats file for a volume. Returns False if it didn't exist."""
         path = self.paths.volume_beats_file(volume_number)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
+    # ==================================================================
+    # Volume Framework (volNN.framework.yaml)
+    # ==================================================================
+    def save_volume_framework(self, data: VolumeFramework) -> Path:
+        """Persist the writing-framework briefing for a volume."""
+        path = self.paths.volume_framework_file(data.volume_number)
+        payload = data.model_dump(mode="json")
+        atomic_write(
+            path,
+            yaml.dump(payload, allow_unicode=True, sort_keys=False, default_flow_style=False),
+        )
+        return path
+
+    def load_volume_framework(self, volume_number: int) -> VolumeFramework | None:
+        """Load the writing framework for a volume, or None if missing."""
+        path = self.paths.volume_framework_file(volume_number)
+        if not path.exists():
+            return None
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return None
+        return VolumeFramework(**raw)
+
+    def delete_volume_framework(self, volume_number: int) -> bool:
+        """Remove the framework file. Returns False if it did not exist."""
+        path = self.paths.volume_framework_file(volume_number)
         if not path.exists():
             return False
         path.unlink()
@@ -236,6 +276,8 @@ class OutlineStore:
                 f"第 {number} 卷仍有章节 {members}，请先删除章节或启用级联删除"
             )
         self.paths.volume_outline(number).unlink(missing_ok=True)
+        self.delete_volume_beats(number)
+        self.delete_volume_framework(number)
         return deleted
 
     def read_chapter(self, number: int) -> ChapterOutline | None:

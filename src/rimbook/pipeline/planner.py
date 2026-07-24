@@ -26,6 +26,8 @@ from ..memory.threads import ThreadStore
 from ..outline import (
     ChapterOutline, OutlineStore, SceneBeat, VolumeOutline,
     RawBeat, RefinedBeat, ChapterAssignment, VolumeBeatData, MicroScene,
+    FrameworkCastEntry, FrameworkCraftFocus, FrameworkReaderLens,
+    FrameworkStage, VolumeFramework,
 )
 from ..planning_entities import (
     DETAIL_TYPE_ORDER,
@@ -715,12 +717,13 @@ class Planner:
     def plan_volume_v2(
         self, number: int, *, title: str = ""
     ) -> Generator[dict, None, None]:
-        """Four-step volume planning pipeline (yields SSE event dicts).
+        """Five-step volume planning pipeline (yields SSE event dicts).
 
-        Step 1: Volume structure.
-        Step 2: Volume cast / planning codex expansion.
-        Step 3: Continuous beat chain.
-        Step 4: Refine beats + assemble into chapters.
+        Step 1: Writing framework + detailed cast/stage briefing.
+        Step 2: Detailed volume outline (title/arc/ending/chapter_count).
+        Step 3: Volume cast / planning codex expansion.
+        Step 4: Continuous beat chain.
+        Step 5: Refine beats + assemble into chapters.
         """
         if self.outline.read_volume(number) is not None:
             raise FileExistsError(f"第 {number} 卷已存在，禁止重复规划")
@@ -731,54 +734,153 @@ class Planner:
         prev = self.outline.list_chapters()
         prev_recap = _format_prev_chapters(prev[-8:]) if prev else ""
         max_chapter = max((c.number for c in prev), default=0)
-
-        # === Step 1: Volume structure ===
-        yield {"event": "step", "data": {"step": 1, "status": "running", "message": "正在生成卷大纲与结局…"}}
-
-        entity_registry = self._format_entity_registry()
         open_threads = self._format_open_threads(max_chapter + 1)
-
-        entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
         open_threads_block = (
             f"未回收的情节线索（本卷应推进或回收，不得遗忘）：\n{open_threads}\n\n"
             if open_threads else ""
         )
+        prev_recap_block = (
+            f"前卷已写章节回顾（请与本卷衔接，避免重复或断层）：\n{prev_recap}\n\n"
+            if prev_recap
+            else "前卷已写章节回顾：\n（尚无章节——本书可能刚刚开始，请按空白读者期待处理）\n\n"
+        )
+        revealed_index = self._format_revealed_codex_index()
+        title_hint = f"（标题：{title}）" if title else ""
+        warnings: list[str] = []
 
-        turn1_user = self.prompts.volume_user.format(
-            synopsis=synopsis,
+        # === Step 1: Writing framework + detailed cast/stage ===
+        yield {"event": "step", "data": {
+            "step": 1, "status": "running",
+            "message": "正在生成写作框架与详述出场…",
+        }}
+
+        planning_full = ""
+        if self.planning_entities is not None:
+            planning_full = self.planning_entities.render_full(volume_number=number)
+        planning_full_block = (
+            f"{planning_full}\n\n" if planning_full else "完整设定集全文：\n（暂无）\n\n"
+        )
+
+        framework_user = self.prompts.volume_framework_user.format(
+            synopsis=synopsis or "（无）",
             existing_desc=existing_desc or "（无）",
-            prev_recap_block=(
-                f"前卷已写章节回顾（请与本卷衔接，避免重复或断层）：\n{prev_recap}\n\n"
-                if prev_recap else ""
-            ),
-            entity_registry_block=entity_registry_block,
+            prev_recap_block=prev_recap_block,
             open_threads_block=open_threads_block,
+            revealed_index=revealed_index,
+            planning_full_block=planning_full_block,
             number=number,
-            title_hint=(f"（标题：{title}）" if title else ""),
+            title_hint=title_hint,
         )
-        messages = self.llm.as_chat(system=self.prompts.volume_system, user=turn1_user)
-        with self.trace.begin("volume_v2", project=self.project_name, volume=number) as t:
-            vol_data = self.llm.generate_json(messages, temperature=1.0)
-            t.record(messages, vol_data, model=self.llm.default_model)
-
-        vol_title, arc, ending, chapter_count, warnings = _parse_volume_json(
-            vol_data, number=number, title_hint=title
+        framework_messages = self.llm.as_chat(
+            system=self.prompts.volume_framework_system,
+            user=framework_user,
         )
+        with self.trace.begin("volume_framework", project=self.project_name, volume=number) as t:
+            framework_raw = self.llm.generate_json(framework_messages, temperature=1.0)
+            t.record(framework_messages, framework_raw, model=self.llm.default_model)
 
-        vol = VolumeOutline(number=number, title=vol_title, arc=arc, ending=ending, chapters=[], recap="")
-        self.outline.write_volume(vol)
+        known_ids: set[str] = set()
+        if self.planning_entities is not None:
+            known_ids = {e.id for e in self.planning_entities.store.list_entries()}
+        framework, fw_warnings = _parse_volume_framework(
+            framework_raw if isinstance(framework_raw, dict) else {},
+            volume_number=number,
+            known_ids=known_ids,
+        )
+        warnings.extend(fw_warnings)
+        self.outline.save_volume_framework(framework)
+        framework_block = _format_framework_block(framework)
 
         yield {"event": "step", "data": {
             "step": 1, "status": "done",
-            "message": "卷大纲已生成",
-            "volume": {"number": number, "title": vol_title, "arc": arc, "ending": ending, "chapter_count": chapter_count},
+            "message": (
+                f"写作框架已生成（出场 {len(framework.cast)}，"
+                f"舞台 {len(framework.stages)}）"
+            ),
+            "framework": {
+                "casting_note": framework.casting_note,
+                "cast": [
+                    {"id": c.id, "billing": c.billing}
+                    for c in framework.cast
+                ],
+                "stages": [{"id": s.id} for s in framework.stages],
+                "involved_ids": list(framework.involved_ids),
+            },
+            "warnings": list(fw_warnings),
         }}
 
-        # === Step 2: Volume cast / planning codex expansion ===
+        # === Step 2: Detailed volume outline ===
+        yield {"event": "step", "data": {
+            "step": 2, "status": "running",
+            "message": "正在生成详尽卷大纲…",
+        }}
+
+        involved_full = ""
+        if self.planning_entities is not None and framework.involved_ids:
+            involved_full = self.planning_entities.render_entries_full(
+                framework.involved_ids, volume_number=number,
+            )
+        elif self.planning_entities is not None:
+            involved_full = self.planning_entities.render_full(volume_number=number)
+        involved_entities_full = (
+            f"本卷涉及实体全量设定：\n{involved_full}\n\n"
+            if involved_full else ""
+        )
+
+        outline_user = self.prompts.volume_user.format(
+            synopsis=synopsis or "（无）",
+            existing_desc=existing_desc or "（无）",
+            prev_recap_block=prev_recap_block,
+            framework_block=framework_block,
+            involved_entities_full=involved_entities_full,
+            open_threads_block=open_threads_block,
+            number=number,
+            title_hint=title_hint,
+        )
+        outline_messages = self.llm.as_chat(
+            system=self.prompts.volume_system,
+            user=outline_user,
+        )
+        with self.trace.begin("volume_v2", project=self.project_name, volume=number) as t:
+            vol_data = self.llm.generate_json(outline_messages, temperature=1.0)
+            t.record(outline_messages, vol_data, model=self.llm.default_model)
+
+        vol_title, arc, ending, chapter_count, vol_warnings = _parse_volume_json(
+            vol_data, number=number, title_hint=title
+        )
+        warnings.extend(vol_warnings)
+
+        vol = VolumeOutline(
+            number=number, title=vol_title, arc=arc, ending=ending, chapters=[], recap="",
+        )
+        self.outline.write_volume(vol)
+
+        yield {"event": "step", "data": {
+            "step": 2, "status": "done",
+            "message": "详尽卷大纲已生成",
+            "volume": {
+                "number": number,
+                "title": vol_title,
+                "arc": arc,
+                "ending": ending,
+                "chapter_count": chapter_count,
+            },
+        }}
+
+        # Entity context for later steps: prefer involved full pack.
+        if self.planning_entities is not None and framework.involved_ids:
+            entity_registry = self._format_entity_registry(
+                entry_ids=framework.involved_ids, volume=number, full=True,
+            )
+        else:
+            entity_registry = self._format_entity_registry()
+        entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
+
+        # === Step 3: Volume cast / planning codex expansion ===
         cast_changes: dict[str, object] = {}
         if self.planning_entities is not None:
             yield {"event": "step", "data": {
-                "step": 2, "status": "running",
+                "step": 3, "status": "running",
                 "message": "正在扩充本卷出场设定…",
             }}
             story_context = (
@@ -786,15 +888,22 @@ class Planner:
                 f"既有卷：\n{existing_desc or '（无）'}\n\n"
                 f"近八章剧情：\n{prev_recap or '（尚无章节）'}"
             )
+            if framework.involved_ids:
+                planning_brief = self.planning_entities.render_entries_full(
+                    framework.involved_ids, volume_number=number,
+                )
+            else:
+                planning_brief = self._format_planning_entity_brief(volume=number)
             cast_messages = self.llm.as_chat(
                 system=self.prompts.volume_cast_system,
                 user=self.prompts.volume_cast_user.format(
                     volume_title=vol_title,
                     volume_arc=arc,
                     volume_ending=ending,
+                    framework_block=framework_block,
                     story_context=story_context,
-                    planning_brief=self._format_planning_entity_brief(volume=number),
-                    revealed_index=self._format_revealed_codex_index(),
+                    planning_brief=planning_brief,
+                    revealed_index=revealed_index,
                     occupied_names=self.planning_entities.occupied_names_block(),
                 ),
             )
@@ -823,30 +932,43 @@ class Planner:
                 cast_result.created_relationships.extend(rel_result.created_relationships)
                 cast_result.updated_relationships.extend(rel_result.updated_relationships)
             cast_changes = cast_result.model_dump()
-            entity_registry = self._format_entity_registry()
+            # Refresh registry after expansion (still prefer involved + new).
+            refresh_ids = list(dict.fromkeys([
+                *framework.involved_ids,
+                *cast_result.created_entries,
+                *cast_result.updated_entries,
+            ]))
+            entity_registry = self._format_entity_registry(
+                entry_ids=refresh_ids or None, volume=number, full=True,
+            )
             entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
             yield {"event": "step", "data": {
-                "step": 2, "status": "done",
+                "step": 3, "status": "done",
                 "message": f"本卷设定扩充完成（{cast_result.change_count} 项变更）",
                 "changes": cast_changes,
             }}
         else:
             yield {"event": "step", "data": {
-                "step": 2, "status": "done",
+                "step": 3, "status": "done",
                 "message": "未启用完整设定集，跳过本卷设定扩充",
             }}
 
-        # === Step 3: Continuous beat chain ===
+        # === Step 4: Continuous beat chain ===
         min_beats = max(chapter_count * 3, 12)
         max_beats = chapter_count * 6
-        yield {"event": "step", "data": {"step": 3, "status": "running", "message": f"正在生成连续 beat 链（{min_beats}~{max_beats} 个）…"}}
+        yield {"event": "step", "data": {
+            "step": 4, "status": "running",
+            "message": f"正在生成连续 beat 链（{min_beats}~{max_beats} 个）…",
+        }}
 
         history = [
-            {"role": "user", "content": turn1_user},
+            {"role": "user", "content": outline_user},
             {"role": "assistant", "content": json.dumps(dict(vol_data), ensure_ascii=False)},
         ]
         messages2 = self.llm.as_chat(
-            system=self.prompts.volume_beats_system.format(min_beats=min_beats, max_beats=max_beats),
+            system=self.prompts.volume_beats_system.format(
+                min_beats=min_beats, max_beats=max_beats,
+            ),
             user=self.prompts.volume_beats_user.format(
                 volume_title=vol_title,
                 volume_arc=arc,
@@ -870,19 +992,18 @@ class Planner:
         warnings.extend(beat_warnings)
         if len(raw_beats) < min_beats:
             warnings.append(f"beat 数量 {len(raw_beats)} 低于建议下限 {min_beats}")
-        # Non-blocking legacy compat: optional entity_changes in beat output
         self._apply_planning_entity_changes(beats_data, source="volume_beats")
 
-        beat_data = VolumeBeatData(volume=number, step=3, raw_beats=raw_beats)
+        beat_data = VolumeBeatData(volume=number, step=4, raw_beats=raw_beats)
         self.outline.save_volume_beats(beat_data)
 
         yield {"event": "step", "data": {
-            "step": 3, "status": "done",
+            "step": 4, "status": "done",
             "message": f"已生成 {len(raw_beats)} 个 beat",
             "beats": [b.model_dump() for b in raw_beats],
         }}
 
-        # === Step 4: Refine + Assemble ===
+        # === Step 5: Refine + Assemble ===
         yield from self._step4_refine_and_assemble(
             number=number,
             vol_title=vol_title,
@@ -891,15 +1012,17 @@ class Planner:
             chapter_count=chapter_count,
             raw_beats=raw_beats,
             start_chapter_number=max_chapter + 1,
+            pipeline_step=5,
+            involved_ids=framework.involved_ids or None,
         )
 
     def assemble_from_beats(
         self, volume_number: int, beats: list[RawBeat] | None = None
     ) -> Generator[dict, None, None]:
-        """Re-run Step 4 (refine + assemble) using current or provided beats.
+        """Re-run Step 5 (refine + assemble) using current or provided beats.
 
         If *beats* is None, loads raw_beats from the persisted beats file.
-        Yields SSE event dicts for Step 4 only.
+        Yields SSE event dicts for the assemble step only.
         """
         vol = self.outline.read_volume(volume_number)
         if vol is None:
@@ -924,6 +1047,9 @@ class Planner:
             start_number = min(c.number for c in existing_vol_chapters)
             chapter_count = len(existing_vol_chapters)
 
+        framework = self.outline.load_volume_framework(volume_number)
+        involved = framework.involved_ids if framework else None
+
         yield from self._step4_refine_and_assemble(
             number=volume_number,
             vol_title=vol.title,
@@ -932,6 +1058,8 @@ class Planner:
             chapter_count=chapter_count,
             raw_beats=beats,
             start_chapter_number=start_number,
+            pipeline_step=5,
+            involved_ids=involved or None,
         )
 
     def _step4_refine_and_assemble(
@@ -944,27 +1072,35 @@ class Planner:
         chapter_count: int,
         raw_beats: list[RawBeat],
         start_chapter_number: int,
+        pipeline_step: int = 5,
+        involved_ids: list[str] | None = None,
     ) -> Generator[dict, None, None]:
-        """Step 4a: group + keynote; Step 4b: per-chapter MicroScenes; persist."""
+        """Group + keynote + per-chapter MicroScenes; persist as final pipeline step."""
         yield {"event": "step", "data": {
-            "step": 4, "status": "running", "phase": "grouping",
+            "step": pipeline_step, "status": "running", "phase": "grouping",
             "message": f"正在将 {len(raw_beats)} 个 beat 分组为 {chapter_count} 章并写章基调…",
         }}
 
         beats_json = json.dumps(
             [b.model_dump() for b in raw_beats], ensure_ascii=False, indent=1,
         )
+        if self.planning_entities is not None:
+            if involved_ids:
+                entity_brief = self.planning_entities.render_entries_full(
+                    involved_ids, volume_number=number,
+                )
+            else:
+                entity_brief = self._format_planning_entity_brief(volume=number)
+            entity_brief_block = f"{entity_brief}\n\n" if entity_brief else ""
+        else:
+            entity_brief_block = ""
         messages_assemble = self.llm.as_chat(
             system=self.prompts.beat_assemble_system.format(chapter_count=chapter_count),
             user=self.prompts.beat_assemble_user.format(
                 volume_title=vol_title,
                 volume_arc=arc,
                 volume_ending=ending,
-                entity_brief_block=(
-                    f"{self._format_planning_entity_brief(volume=number)}\n\n"
-                    if self.planning_entities is not None
-                    else ""
-                ),
+                entity_brief_block=entity_brief_block,
                 beat_count=len(raw_beats),
                 chapter_count=chapter_count,
                 beats_json=beats_json,
@@ -979,11 +1115,11 @@ class Planner:
         chapter_map, beat_pool = _parse_assemble_from_raw(assemble_data, raw_beats)
 
         yield {"event": "step", "data": {
-            "step": 4, "status": "running", "phase": "refining",
+            "step": pipeline_step, "status": "running", "phase": "refining",
             "message": f"正在为 {len(chapter_map)} 章生成细场景…",
         }}
 
-        # --- 4b: Per-chapter micro-scenes ---
+        # --- Per-chapter micro-scenes ---
         chapters: list[ChapterOutline] = []
         for i, ca in enumerate(chapter_map):
             ch_number = start_chapter_number + i
@@ -1022,7 +1158,7 @@ class Planner:
             ))
 
         beat_data = VolumeBeatData(
-            volume=number, step=4,
+            volume=number, step=pipeline_step,
             raw_beats=raw_beats,
             refined_beats=[],
             chapter_map=chapter_map,
@@ -1034,7 +1170,7 @@ class Planner:
         self.outline.sync_volume_chapters(number)
 
         yield {"event": "step", "data": {
-            "step": 4, "status": "done",
+            "step": pipeline_step, "status": "done",
             "message": f"已组装 {len(chapters)} 章（含基调与细场景）",
             "chapters": [
                 {
@@ -1376,12 +1512,31 @@ class Planner:
             lines.append(f"  - {e.id}：{e.name}{alias_str}  [{e.type}]")
         return "\n".join(lines)
 
-    def _format_entity_registry(self) -> str:
+    def _format_entity_registry(
+        self,
+        entry_ids: list[str] | None = None,
+        *,
+        volume: int | None = None,
+        full: bool = False,
+    ) -> str:
         """Build combined author-side and reader-side entity context."""
         blocks: list[str] = []
-        planning_brief = self._format_planning_entity_brief()
-        if planning_brief:
-            blocks.append(planning_brief)
+        if self.planning_entities is not None:
+            if full:
+                if entry_ids is not None:
+                    planning_brief = self.planning_entities.render_entries_full(
+                        entry_ids, volume_number=volume,
+                    )
+                else:
+                    planning_brief = self.planning_entities.render_full(
+                        volume_number=volume,
+                    )
+            else:
+                planning_brief = self._format_planning_entity_brief(
+                    entry_ids, volume=volume,
+                )
+            if planning_brief:
+                blocks.append(planning_brief)
         revealed = self._format_revealed_codex_index()
         if revealed and revealed != "（无已揭示设定集）":
             blocks.append(f"已揭示设定集索引（读者已知事实与别名对齐）：\n{revealed}")
@@ -1427,6 +1582,161 @@ def _format_prev_chapters(chapters: list[ChapterOutline]) -> str:
             + (f"；摘要：{c.summary.strip()}" if c.summary.strip() else "")
         )
     return "\n".join(parts)
+
+
+def _format_framework_block(framework: VolumeFramework) -> str:
+    """Render a volume writing framework for downstream prompts."""
+    lens = framework.reader_lens
+    craft = framework.craft_focus
+    lines = [
+        "【本卷写作框架】",
+        f"总述：{framework.casting_note or '（无）'}",
+        "",
+        "## 读者透镜",
+        f"当前视角：{lens.current_perspective or '（无）'}",
+        f"读者期待：{lens.what_they_want or '（无）'}",
+    ]
+    if lens.reveal_debts:
+        lines.append("揭示债务：")
+        lines.extend(f"- {d}" for d in lens.reveal_debts)
+    lines.extend([
+        "",
+        "## 写作手法重心",
+        f"冲突：{craft.conflict or '（无）'}",
+        f"反转：{craft.reversal or '（无）'}",
+        f"发展：{craft.development or '（无）'}",
+        f"悬疑：{craft.suspense or '（无）'}",
+        f"其他：{craft.other or '（无）'}",
+        "",
+        "## 舞台",
+    ])
+    if not framework.stages:
+        lines.append("（无）")
+    for stage in framework.stages:
+        lines.append(f"### {stage.id}")
+        lines.append(f"为何此舞台：{stage.why_this_stage}")
+        lines.append(f"舞台压力：{stage.dramatic_pressure}")
+    lines.extend(["", "## 出场"])
+    if not framework.cast:
+        lines.append("（无）")
+    for entry in framework.cast:
+        lines.append(f"### {entry.id}（{entry.billing}）")
+        lines.append(f"处境与动机：{entry.situation}")
+        lines.append(f"剧情影响：{entry.dramatic_impact}")
+    if framework.involved_ids:
+        lines.extend([
+            "",
+            f"涉及实体 id：{', '.join(framework.involved_ids)}",
+        ])
+    return "\n".join(lines) + "\n\n"
+
+
+_VALID_BILLINGS = frozenset({
+    "lead", "supporting", "antagonist", "cameo", "mentioned",
+})
+
+
+def _parse_volume_framework(
+    data: dict,
+    *,
+    volume_number: int,
+    known_ids: set[str],
+) -> tuple[VolumeFramework, list[str]]:
+    """Parse Step1 framework JSON; drop unknown ids and strip outline fields."""
+    warnings: list[str] = []
+    for banned in ("title", "arc", "ending", "chapter_count"):
+        if banned in data and data.get(banned) not in (None, ""):
+            warnings.append(f"写作框架输出含禁止字段 {banned}，已忽略")
+
+    lens_raw = data.get("reader_lens") if isinstance(data.get("reader_lens"), dict) else {}
+    debts = lens_raw.get("reveal_debts") or []
+    if not isinstance(debts, list):
+        debts = [str(debts)]
+    reader_lens = FrameworkReaderLens(
+        current_perspective=str(lens_raw.get("current_perspective") or "").strip(),
+        what_they_want=str(lens_raw.get("what_they_want") or "").strip(),
+        reveal_debts=[str(d).strip() for d in debts if str(d).strip()],
+    )
+
+    craft_raw = data.get("craft_focus") if isinstance(data.get("craft_focus"), dict) else {}
+    craft_focus = FrameworkCraftFocus(
+        conflict=str(craft_raw.get("conflict") or "").strip(),
+        reversal=str(craft_raw.get("reversal") or "").strip(),
+        development=str(craft_raw.get("development") or "").strip(),
+        suspense=str(craft_raw.get("suspense") or "").strip(),
+        other=str(craft_raw.get("other") or "").strip(),
+    )
+
+    stages: list[FrameworkStage] = []
+    seen_stage_ids: set[str] = set()
+    for item in data.get("stages") or []:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("id") or "").strip()
+        if not sid:
+            continue
+        if known_ids and sid not in known_ids:
+            warnings.append(f"舞台 id 未知，已丢弃：{sid}")
+            continue
+        if sid in seen_stage_ids:
+            warnings.append(f"舞台 id 重复，已合并保留首条：{sid}")
+            continue
+        seen_stage_ids.add(sid)
+        stages.append(FrameworkStage(
+            id=sid,
+            why_this_stage=str(item.get("why_this_stage") or "").strip(),
+            dramatic_pressure=str(item.get("dramatic_pressure") or "").strip(),
+        ))
+    if len(stages) > 6:
+        warnings.append(f"舞台数量 {len(stages)} 超过软上限 6，已截断")
+        stages = stages[:6]
+
+    cast: list[FrameworkCastEntry] = []
+    for item in data.get("cast") or []:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("id") or "").strip()
+        if not cid:
+            continue
+        if known_ids and cid not in known_ids:
+            warnings.append(f"出场 id 未知，已丢弃：{cid}")
+            continue
+        billing = str(item.get("billing") or "supporting").strip().lower()
+        if billing not in _VALID_BILLINGS:
+            warnings.append(f"billing 非法 {billing!r}（{cid}），已改为 supporting")
+            billing = "supporting"
+        cast.append(FrameworkCastEntry(
+            id=cid,
+            billing=billing,
+            situation=str(item.get("situation") or "").strip(),
+            dramatic_impact=str(item.get("dramatic_impact") or "").strip(),
+        ))
+    if len(cast) > 12:
+        warnings.append(f"出场数量 {len(cast)} 超过软上限 12，已截断")
+        cast = cast[:12]
+
+    involved_raw = data.get("involved_ids") or []
+    if not isinstance(involved_raw, list):
+        involved_raw = []
+    involved_ids = [str(x).strip() for x in involved_raw if str(x).strip()]
+    if known_ids:
+        filtered = [i for i in involved_ids if i in known_ids]
+        for dropped in set(involved_ids) - set(filtered):
+            warnings.append(f"involved_ids 含未知 id，已丢弃：{dropped}")
+        involved_ids = filtered
+
+    framework = VolumeFramework(
+        volume_number=volume_number,
+        reader_lens=reader_lens,
+        craft_focus=craft_focus,
+        stages=stages,
+        cast=cast,
+        casting_note=str(data.get("casting_note") or "").strip(),
+        involved_ids=involved_ids,
+    )
+    if not framework.cast and not framework.stages:
+        warnings.append("写作框架未选出任何出场或舞台")
+    return framework, warnings
 
 
 def _parse_volume_json(

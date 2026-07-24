@@ -128,6 +128,34 @@ def test_render_brief_limits_to_requested_entities_and_relationships(tmp_path):
     assert "证据归属" in brief
 
 
+def test_render_full_keeps_detail_and_can_filter_ids(tmp_path):
+    store, service = _service(tmp_path)
+    store.save_entry(
+        PlanningCodexEntry(
+            id="hero",
+            name="林默",
+            type="character",
+            surface_summary="调查员",
+            detail="A" * 800,
+            secret_truth="知道病毒",
+        )
+    )
+    store.save_entry(
+        PlanningCodexEntry(
+            id="outsider",
+            name="外来者",
+            type="character",
+            detail="应被过滤",
+        )
+    )
+    full = service.render_full(["hero"])
+    assert "林默" in full
+    assert "A" * 800 in full
+    assert "知道病毒" in full
+    assert "外来者" not in full
+    assert "详情摘要" not in full  # not the brief truncation label
+
+
 def test_malformed_optional_llm_changes_are_ignored():
     changes = EntityNetworkChanges.from_payload({
         "entities": [

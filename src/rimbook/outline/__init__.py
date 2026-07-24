@@ -16,6 +16,11 @@ from .models import (
     RefinedBeat,
     ChapterAssignment,
     VolumeBeatData,
+    FrameworkReaderLens,
+    FrameworkCraftFocus,
+    FrameworkStage,
+    FrameworkCastEntry,
+    VolumeFramework,
 )
 from .store import OutlineStore
 
@@ -29,5 +34,10 @@ __all__ = [
     "RefinedBeat",
     "ChapterAssignment",
     "VolumeBeatData",
+    "FrameworkReaderLens",
+    "FrameworkCraftFocus",
+    "FrameworkStage",
+    "FrameworkCastEntry",
+    "VolumeFramework",
     "OutlineStore",
 ]

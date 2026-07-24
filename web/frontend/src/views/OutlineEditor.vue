@@ -93,7 +93,7 @@
               <span class="ai-hero-icon"><el-icon :size="22"><FolderAdd /></el-icon></span>
               <span class="ai-hero-body">
                 <span class="ai-hero-title">新卷</span>
-                <span class="ai-hero-desc">规划卷大纲 → 生成连续 beat 链 → 细化并组装为章节</span>
+                <span class="ai-hero-desc">写作框架 → 详尽卷大纲 → 设定扩充 → Beat 链 → 细化组装</span>
               </span>
               <el-icon v-if="generating" class="is-loading ai-hero-loading"><Loading /></el-icon>
             </button>
@@ -416,10 +416,11 @@ const generating = computed(() =>
 const volumePlan = computed(() => store.volumePlan)
 const foundationPlan = computed(() => store.foundationPlan)
 const planSteps = [
-  { num: 1, label: '卷大纲' },
-  { num: 2, label: '设定扩充' },
-  { num: 3, label: 'Beat 链' },
-  { num: 4, label: '细化组装' },
+  { num: 1, label: '写作框架' },
+  { num: 2, label: '卷大纲' },
+  { num: 3, label: '设定扩充' },
+  { num: 4, label: 'Beat 链' },
+  { num: 5, label: '细化组装' },
 ]
 
 function bannerStepFromRaw(step: number, coefficient: number): number {
@@ -510,18 +511,20 @@ function wireVolumePlanHandlers(opts?: { onDoneExtra?: () => void | Promise<void
       if (!data.message) {
         if (data.status === 'running') {
           const defaults: Record<number, string> = {
-            1: '正在生成卷大纲与结局…',
-            2: '正在扩充本卷出场设定…',
-            3: '正在生成连续 beat 链…',
-            4: '正在细化并组装章节…',
+            1: '正在生成写作框架与详述出场…',
+            2: '正在生成详尽卷大纲…',
+            3: '正在扩充本卷出场设定…',
+            4: '正在生成连续 beat 链…',
+            5: '正在细化并组装章节…',
           }
           store.patchVolumePlan({ message: defaults[data.step] || store.volumePlan.message })
         } else if (data.status === 'done') {
           const defaults: Record<number, string> = {
-            1: '卷大纲已生成',
-            2: '本卷设定扩充完成',
-            3: 'Beat 链已生成',
-            4: '章节组装完成',
+            1: '写作框架已生成',
+            2: '详尽卷大纲已生成',
+            3: '本卷设定扩充完成',
+            4: 'Beat 链已生成',
+            5: '章节组装完成',
           }
           store.patchVolumePlan({ message: defaults[data.step] || store.volumePlan.message })
         }
@@ -544,6 +547,7 @@ function wireVolumePlanHandlers(opts?: { onDoneExtra?: () => void | Promise<void
         editingVolume.value = vol
         Object.assign(volumeForm, { title: vol.title, arc: vol.arc, ending: vol.ending })
         beatPanelRef.value?.loadBeats()
+        beatPanelRef.value?.loadFramework?.()
       }
       await opts?.onDoneExtra?.()
       ElMessage.success('卷规划完成（含 beat 细化与章节组装）')
@@ -845,8 +849,8 @@ async function confirmAddVolume() {
     : 1
   try {
     await ElMessageBox.confirm(
-      `将由 AI 规划第 ${nextNum} 卷：\n① 卷大纲\n② 本卷设定扩充\n③ 连续 Beat 链\n④ 章节细化组装\n\n全流程约需 1-2 分钟，完成后你可以编辑 beat 再重新组装。是否继续？`,
-      '规划新卷（四步管线）',
+      `将由 AI 规划第 ${nextNum} 卷：\n① 写作框架与详述出场\n② 详尽卷大纲\n③ 本卷设定扩充\n④ 连续 Beat 链\n⑤ 章节细化组装\n\n全流程约需数分钟，完成后你可以编辑 beat 再重新组装。是否继续？`,
+      '规划新卷（五步管线）',
       {
         type: 'info',
         confirmButtonText: '开始规划',

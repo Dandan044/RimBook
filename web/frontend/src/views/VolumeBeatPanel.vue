@@ -14,7 +14,7 @@
           <span v-else>{{ s.num }}</span>
         </div>
         <span class="step-label">{{ s.label }}</span>
-        <div v-if="s.num < 4" class="step-line" :class="{ filled: currentStep > s.num }" />
+        <div v-if="s.num < 5" class="step-line" :class="{ filled: currentStep > s.num }" />
       </div>
       <span v-if="phaseLabel" class="phase-label">{{ phaseLabel }}</span>
     </div>
@@ -23,6 +23,72 @@
     <div v-if="running" class="running-overlay">
       <el-icon class="is-loading" :size="20"><Loading /></el-icon>
       <span>{{ progressMsg || '正在处理…' }}</span>
+    </div>
+
+    <!-- Writing framework (Step 1) -->
+    <div v-if="framework" class="framework-section">
+      <el-collapse v-model="frameworkOpen">
+        <el-collapse-item name="framework">
+          <template #title>
+            <div class="framework-title">
+              <span>写作框架与详述出场</span>
+              <span class="framework-meta">
+                出场 {{ framework.cast.length }} · 舞台 {{ framework.stages.length }}
+              </span>
+            </div>
+          </template>
+
+          <p v-if="framework.casting_note" class="framework-note">{{ framework.casting_note }}</p>
+
+          <div class="framework-block">
+            <h4>读者透镜</h4>
+            <p v-if="framework.reader_lens.current_perspective">
+              <strong>当前视角：</strong>{{ framework.reader_lens.current_perspective }}
+            </p>
+            <p v-if="framework.reader_lens.what_they_want">
+              <strong>读者期待：</strong>{{ framework.reader_lens.what_they_want }}
+            </p>
+            <div v-if="framework.reader_lens.reveal_debts?.length" class="framework-list">
+              <strong>揭示债务：</strong>
+              <ul>
+                <li v-for="(d, i) in framework.reader_lens.reveal_debts" :key="i">{{ d }}</li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="framework-block">
+            <h4>写作手法重心</h4>
+            <p v-if="framework.craft_focus.conflict"><strong>冲突：</strong>{{ framework.craft_focus.conflict }}</p>
+            <p v-if="framework.craft_focus.reversal"><strong>反转：</strong>{{ framework.craft_focus.reversal }}</p>
+            <p v-if="framework.craft_focus.development"><strong>发展：</strong>{{ framework.craft_focus.development }}</p>
+            <p v-if="framework.craft_focus.suspense"><strong>悬疑：</strong>{{ framework.craft_focus.suspense }}</p>
+            <p v-if="framework.craft_focus.other"><strong>其他：</strong>{{ framework.craft_focus.other }}</p>
+          </div>
+
+          <div v-if="framework.stages.length" class="framework-block">
+            <h4>舞台</h4>
+            <div v-for="s in framework.stages" :key="s.id" class="framework-card">
+              <div class="framework-card-head">
+                <code>{{ s.id }}</code>
+              </div>
+              <p v-if="s.why_this_stage"><strong>为何此舞台：</strong>{{ s.why_this_stage }}</p>
+              <p v-if="s.dramatic_pressure"><strong>舞台压力：</strong>{{ s.dramatic_pressure }}</p>
+            </div>
+          </div>
+
+          <div v-if="framework.cast.length" class="framework-block">
+            <h4>出场人物</h4>
+            <div v-for="c in framework.cast" :key="c.id" class="framework-card">
+              <div class="framework-card-head">
+                <code>{{ c.id }}</code>
+                <el-tag size="small" effect="plain">{{ billingLabel(c.billing) }}</el-tag>
+              </div>
+              <p v-if="c.situation"><strong>处境与动机：</strong>{{ c.situation }}</p>
+              <p v-if="c.dramatic_impact"><strong>剧情影响：</strong>{{ c.dramatic_impact }}</p>
+            </div>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </div>
 
     <!-- Beat Chain -->
@@ -124,9 +190,9 @@
 import { ref, reactive, computed, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  getVolumeBeats, updateVolumeBeats, addVolumeBeat, deleteVolumeBeat,
+  getVolumeBeats, getVolumeFramework, updateVolumeBeats, addVolumeBeat, deleteVolumeBeat,
   assembleVolumeSSE,
-  type RawBeat, type VolumeBeatData, type PlanSSEHandle,
+  type RawBeat, type VolumeBeatData, type VolumeFramework, type PlanSSEHandle,
 } from '../api'
 import { useProjectStore } from '../stores/project'
 
@@ -143,10 +209,11 @@ const emit = defineEmits<{
 const store = useProjectStore()
 
 const steps = [
-  { num: 1, label: '卷大纲' },
-  { num: 2, label: '设定扩充' },
-  { num: 3, label: 'Beat 链' },
-  { num: 4, label: '细化组装' },
+  { num: 1, label: '写作框架' },
+  { num: 2, label: '卷大纲' },
+  { num: 3, label: '设定扩充' },
+  { num: 4, label: 'Beat 链' },
+  { num: 5, label: '细化组装' },
 ]
 
 const loaded = ref(false)
@@ -157,6 +224,8 @@ const stepStatus = ref<'idle' | 'running' | 'done'>('idle')
 const phase = ref('')
 const beats = ref<RawBeat[]>([])
 const beatData = ref<VolumeBeatData | null>(null)
+const framework = ref<VolumeFramework | null>(null)
+const frameworkOpen = ref<string[]>(['framework'])
 const selectedBeatId = ref<string | null>(null)
 const editingBeatId = ref<string | null>(null)
 const dirty = ref(false)
@@ -165,6 +234,18 @@ let sseHandle: PlanSSEHandle | null = null
 
 const editForm = reactive({ goal: '', conflict: '', outcome: '', momentum: '', entities: [] as string[] })
 const newBeat = reactive({ goal: '', conflict: '', outcome: '', momentum: '', entities: [] as string[] })
+
+const BILLING_LABELS: Record<string, string> = {
+  lead: '主角',
+  supporting: '配角',
+  antagonist: '对立/压力源',
+  cameo: '客串',
+  mentioned: '提及',
+}
+
+function billingLabel(billing: string) {
+  return BILLING_LABELS[billing] || billing
+}
 
 const selectedBeat = computed(() => beats.value.find(b => b.id === selectedBeatId.value) || null)
 const canAssemble = computed(() => beats.value.length >= 3 && !running.value && !store.volumePlan.active)
@@ -195,7 +276,16 @@ watch(
 )
 
 // Load beat data when volume changes
-watch(() => props.volumeNumber, loadBeats, { immediate: true })
+watch(() => props.volumeNumber, () => { loadBeats(); loadFramework() }, { immediate: true })
+
+async function loadFramework() {
+  if (!props.projectId || !props.volumeNumber) return
+  try {
+    framework.value = await getVolumeFramework(props.projectId, props.volumeNumber)
+  } catch {
+    framework.value = null
+  }
+}
 
 async function loadBeats() {
   if (!props.projectId || !props.volumeNumber) return
@@ -207,7 +297,7 @@ async function loadBeats() {
     // Don't clobber an in-flight pipeline indicator.
     if (!store.volumePlan.active || store.volumePlan.volume !== props.volumeNumber) {
       currentStep.value = data.step || 0
-      stepStatus.value = data.step >= 3 ? 'done' : (data.step > 0 ? 'done' : 'idle')
+      stepStatus.value = data.step >= 4 ? 'done' : (data.step > 0 ? 'done' : 'idle')
     }
   } catch {
     beats.value = []
@@ -322,19 +412,31 @@ function doAssemble() {
       ElMessage.success('章节组装完成')
       emit('assembled')
       loadBeats()
+      loadFramework()
     },
   })
   store.bindVolumePlanSse(sseHandle)
 }
 
 /** Called by parent when the full v2 pipeline SSE sends step events. */
-function handlePipelineStep(data: { step: number; status: string; phase?: string; message?: string; beats?: RawBeat[] }) {
+function handlePipelineStep(data: {
+  step: number
+  status: string
+  phase?: string
+  message?: string
+  beats?: RawBeat[]
+  framework?: Partial<VolumeFramework> & { cast?: Array<{ id: string; billing: string }> }
+}) {
   currentStep.value = data.step
   stepStatus.value = data.status as any
   if (data.phase) phase.value = data.phase
   if (data.message) progressMsg.value = data.message
   if (data.status === 'running') running.value = true
   if (data.beats) beats.value = data.beats
+  // After Step1 done, reload full framework from disk (SSE payload is summary-only).
+  if (data.step === 1 && data.status === 'done') {
+    loadFramework()
+  }
   emit('step', data)
 }
 
@@ -343,7 +445,7 @@ function setRunning(val: boolean, msg?: string) {
   if (msg) progressMsg.value = msg
 }
 
-defineExpose({ handlePipelineStep, setRunning, loadBeats })
+defineExpose({ handlePipelineStep, setRunning, loadBeats, loadFramework })
 </script>
 
 <style scoped>
@@ -428,6 +530,84 @@ defineExpose({ handlePipelineStep, setRunning, loadBeats })
   font-size: 12px;
   color: var(--rb-primary, #6366f1);
   font-weight: 500;
+}
+
+.framework-section {
+  margin-bottom: 16px;
+}
+
+.framework-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+}
+
+.framework-meta {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--rb-text-muted, #9ca3af);
+}
+
+.framework-note {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  background: var(--rb-bg-surface, #fff);
+  border-left: 3px solid var(--rb-primary, #6366f1);
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--rb-text, #374151);
+}
+
+.framework-block {
+  margin-bottom: 14px;
+}
+
+.framework-block h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--rb-text-secondary, #6b7280);
+}
+
+.framework-block p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--rb-text, #374151);
+}
+
+.framework-list ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
+.framework-list li {
+  font-size: 13px;
+  line-height: 1.55;
+  margin-bottom: 2px;
+}
+
+.framework-card {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--rb-bg-surface, #fff);
+  border: 1px solid var(--rb-border-light, #e5e7eb);
+  border-radius: 8px;
+}
+
+.framework-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.framework-card-head code {
+  font-size: 12px;
+  background: var(--rb-bg-subtle, #f3f4f6);
+  padding: 2px 6px;
+  border-radius: 4px;
 }
 
 /* Running overlay */

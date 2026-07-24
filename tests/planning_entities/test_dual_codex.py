@@ -143,6 +143,27 @@ def test_foundation_isolates_bad_entries(tmp_path):
                     {"id": "r1", "source_id": "hero", "target_id": "loc_a", "conflict": "逃离"},
                 ],
             },
+            # Relabel pass for incomplete required fields
+            {
+                "entries": [
+                    {
+                        "id": "hero",
+                        "surface_summary": "调查旧案的青年",
+                        "narrative_role": "主角",
+                        "reveal_strategy": "开篇登场",
+                        "exists_at_anchor": True,
+                        "existence_reason": "故事开篇已经成年",
+                    },
+                    {
+                        "id": "loc_a",
+                        "surface_summary": "故事主舞台",
+                        "narrative_role": "主舞台",
+                        "reveal_strategy": "开篇场景",
+                        "exists_at_anchor": True,
+                        "existence_reason": "已有百年历史",
+                    },
+                ],
+            },
             _detail("旧城", strategic_value="交通枢纽"),
             _detail("林默", inner_need="确认自己没有重蹈父亲覆辙", fear="真相证明自己也是共犯"),
         ],
@@ -160,7 +181,8 @@ def test_foundation_isolates_bad_entries(tmp_path):
     assert service.store.get_entry("hero").details["inner_need"]
     assert service.store.get_entry("loc_a").detail.startswith("## 旧城")
     # Character detail is generated after location and sees its completed history.
-    assert "旧城最初源于" in llm.calls[3][-1]["content"]
+    # calls: synopsis, foundation entries, relabel, loc detail, char detail
+    assert "旧城最初源于" in llm.calls[4][-1]["content"]
 
 
 def test_future_existence_becomes_timeline_event(tmp_path):
@@ -215,11 +237,16 @@ def test_future_existence_becomes_timeline_event(tmp_path):
     assert any("planned 时间线" in issue for issue in planned_issues)
 
 
-def test_volume_steps_are_one_to_four_and_cast_visible(tmp_path):
+def test_volume_steps_are_one_to_five_and_cast_visible(tmp_path):
     paths = scaffold_project(tmp_path / "vol", exist_ok=True)
     outline = OutlineStore(paths)
     outline.write_synopsis("梗概")
     service = PlanningCodexService(PlanningEntityStore(paths))
+    service.store.save_entry(PlanningCodexEntry(
+        id="hero", name="林默", type="character",
+        surface_summary="调查员", narrative_role="主角",
+        reveal_strategy="开篇", detail="详细背景" * 20,
+    ))
 
     def beat(i: int) -> dict[str, Any]:
         return {
@@ -236,11 +263,34 @@ def test_volume_steps_are_one_to_four_and_cast_visible(tmp_path):
     } for i in range(1, 4)]
     micros = [{"beats": [{**b, "scenes": []} for b in beats[i:i + 4]]} for i in range(0, 12, 4)]
 
+    framework = {
+        "reader_lens": {
+            "current_perspective": "读者刚开始",
+            "what_they_want": "想看旧案",
+            "reveal_debts": [],
+        },
+        "craft_focus": {
+            "conflict": "c", "reversal": "r", "development": "d",
+            "suspense": "s", "other": "",
+        },
+        "stages": [],
+        "cast": [{
+            "id": "hero", "billing": "lead",
+            "situation": "处境详述", "dramatic_impact": "影响详述",
+        }],
+        "casting_note": "聚焦林默",
+        "involved_ids": ["hero"],
+    }
+
     llm = FakeLLM(json_responses=[
-        {"title": "卷一", "arc": "弧", "ending": "收束", "chapter_count": 3},
+        framework,
+        {"title": "卷一", "arc": "弧" * 100, "ending": "收束", "chapter_count": 3},
         {
             "entries": [{
                 "id": "hero", "name": "林默", "type": "character",
+                "surface_summary": "调查员",
+                "narrative_role": "主角",
+                "reveal_strategy": "开篇",
                 "secret_truth": "知情", "exists_at_anchor": True,
                 "existence_reason": "已在故事开篇出现",
             }],
@@ -253,9 +303,12 @@ def test_volume_steps_are_one_to_four_and_cast_visible(tmp_path):
     planner = Planner(llm, Prompts(), outline, planning_entities=service)
     events = [e for e in planner.plan_volume_v2(1) if e["event"] == "step"]
     steps = [e["data"]["step"] for e in events if e["data"].get("status") == "done"]
-    assert steps == [1, 2, 3, 4]
-    assert "林默" in llm.calls[2][-1]["content"]  # beat prompt sees cast
+    assert steps == [1, 2, 3, 4, 5]
+    # Step4 beats prompt (call index: framework, outline, cast, beats → 3)
+    assert "林默" in llm.calls[3][-1]["content"]
     assert service.store.get_entry("hero").secret_truth == "知情"
+    fw = outline.load_volume_framework(1)
+    assert fw is not None and fw.cast[0].id == "hero"
 
 
 def test_detail_failure_isolated_and_retry_targets_missing_only(tmp_path):

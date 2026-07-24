@@ -156,11 +156,51 @@ class Prompts:
     volume_cast_user: str = (
         "本卷大纲：\n标题：{volume_title}\n弧线：\n{volume_arc}\n\n"
         "本卷收束：\n{volume_ending}\n\n"
+        "{framework_block}"
         "已发生剧情：\n{story_context}\n\n"
-        "完整设定集摘要：\n{planning_brief}\n\n"
+        "完整设定集（本卷涉及优先）：\n{planning_brief}\n\n"
         "已揭示设定集索引：\n{revealed_index}\n\n"
         "{occupied_names}\n\n"
         "请输出本卷设定扩充 JSON（entries + relationships）。"
+        "勿创造与本卷写作框架中已定出场/舞台功能重叠的新角色；"
+        "优先更新或细化已建组实体。"
+    )
+
+    volume_framework_system: str = (
+        "你是资深写作策划与叙事设计师（不是章纲编剧）。"
+        "根据全书梗概、已有卷目、近章停点、未回收线索、已揭示设定索引与完整设定集全文，"
+        "为本卷产出「写作框架 + 详述出场/舞台」。\n"
+        "【本步不是剧情大纲】禁止输出 title/arc/ending/chapter_count，"
+        "禁止写逐章情节或「第N章谁做了什么」。\n"
+        "【决策顺序】先写 reader_lens 与 craft_focus，再写 stages 与 cast。\n"
+        "【读者透镜】说明读者此刻视角与期待；reveal_debts 只谈信息释放节奏"
+        "（该让读者知道但尚未揭露的设定），区分读者已知与幕后设定，勿剧透式写完结局。\n"
+        "【手法配比】从冲突/反转/发展/悬疑等写作角度说明本卷重心，而非具体剧情走向。\n"
+        "【舞台与出场】id 必须来自设定集；本步不新建实体。"
+        "situation / dramatic_impact / why_this_stage / dramatic_pressure 必须结合给定设定细节写成长文，"
+        "交代处境、动机、目的与将造成的影响（揭露、成长、冲突、助力等），禁止一句话空泛套话。\n"
+        "【软上限】cast≤12，stages≤6；优先精选。\n"
+        "【输出】仅输出一个 JSON 对象：\n"
+        '{"reader_lens":{"current_perspective":"...","what_they_want":"...",'
+        '"reveal_debts":["..."]},'
+        '"craft_focus":{"conflict":"...","reversal":"...","development":"...",'
+        '"suspense":"...","other":"..."},'
+        '"stages":[{"id":"...","why_this_stage":"...","dramatic_pressure":"..."}],'
+        '"cast":[{"id":"...","billing":"lead|supporting|antagonist|cameo|mentioned",'
+        '"situation":"...","dramatic_impact":"..."}],'
+        '"casting_note":"...","involved_ids":["..."]}\n'
+        "involved_ids 应为 cast.id 与 stages.id 的并集。不要输出额外文字。"
+    )
+
+    volume_framework_user: str = (
+        "全书梗概：\n{synopsis}\n\n"
+        "已有卷目：\n{existing_desc}\n\n"
+        "{prev_recap_block}"
+        "{open_threads_block}"
+        "已揭示设定集索引（读者已知对齐）：\n{revealed_index}\n\n"
+        "{planning_full_block}"
+        "请为第 {number} 卷{title_hint}撰写写作框架与详述出场。"
+        "按系统提示仅输出 JSON（勿写卷大纲字段）。"
     )
 
     entity_sync_system: str = (
@@ -284,12 +324,15 @@ class Prompts:
     )
 
     volume_system: str = (
-        "你是一位资深小说策划。根据全书梗概与既有卷目录要，规划下一卷的"
-        "结构化卷大纲。要求覆盖：本卷主线推进、核心冲突、出场主要实体、"
-        "关键场景与转折、张力曲线（应有起伏与高潮）、本卷应埋下与回收的伏笔、"
-        "以及收束与衔接下卷的钩子。\n"
+        "你是一位资深小说策划。根据本卷「写作框架与详述出场」、涉及实体的全量设定、"
+        "全书梗概与既有卷目录要，规划下一卷的详尽卷大纲。\n"
+        "【必须服务框架】arc/ending 必须兑现 craft_focus 与每位 cast/stage 的 "
+        "situation、dramatic_impact、dramatic_pressure；"
+        "不得让未列入 involved 的实体成为主线核心。\n"
+        "【详尽程度】arc 建议 800-1500 字，写出主线推进、冲突升级、信息释放与角色影响的因果链；"
+        "ending 写清收束与衔接下卷的钩子。仍是卷级大纲，不要拆成逐章正文或 MicroScene。\n"
         "【输出格式】仅输出一个 JSON 对象，字段为：\n"
-        '  {"title": "卷标题", "arc": "本卷弧线叙述（约 400-600 字）",'
+        '  {"title": "卷标题", "arc": "详尽本卷弧线",'
         ' "ending": "本卷收束与衔接下卷的钩子（必填，非空）",'
         ' "chapter_count": 6}\n'
         "chapter_count 建议 4-12（整数）。不要输出任何额外文字或代码块标记。"
@@ -299,14 +342,13 @@ class Prompts:
         "全书梗概：\n{synopsis}\n\n"
         "已有卷目：\n{existing_desc}\n\n"
         "{prev_recap_block}"
-        "{entity_registry_block}"
+        "{framework_block}"
+        "{involved_entities_full}"
         "{open_threads_block}"
-        "请规划第 {number} 卷{title_hint}。"
+        "请规划第 {number} 卷{title_hint}的详尽卷大纲。"
         "确保与已有卷目及前卷实际剧情衔接，避免剧情重复或断层；"
-        "若提供了「已有实体清单」，本卷情节应复用这些已确立的角色/地点/设定，"
-        "不得为同一实体另起新名或重复塑造；"
-        "若提供了「未回收的情节线索」，请在本卷规划中明确推进或回收哪些线索，"
-        "勿令其长期悬置或被遗忘；"
+        "严格围绕写作框架中的出场与舞台展开；"
+        "若提供了「未回收的情节线索」，请在本卷规划中明确推进或回收哪些线索；"
         "按系统提示仅输出 JSON（含 title、arc、ending、chapter_count）。"
     )
 

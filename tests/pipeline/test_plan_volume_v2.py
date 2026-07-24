@@ -1,4 +1,4 @@
-"""Tests for Planner.plan_volume_v2 with keynote + MicroScene Step3."""
+"""Tests for Planner.plan_volume_v2 with framework → outline → MicroScene."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from typing import Any
 
 from rimbook.llm.prompts import Prompts
 from rimbook.outline.store import OutlineStore
-from rimbook.pipeline.planner import Planner
+from rimbook.pipeline.planner import Planner, _parse_volume_framework
 from rimbook.project import scaffold_project
 
 
@@ -79,6 +79,34 @@ def _micro_scenes() -> list[dict[str, Any]]:
     ]
 
 
+def _framework() -> dict[str, Any]:
+    return {
+        "reader_lens": {
+            "current_perspective": "读者刚开书，只知旧案重开。",
+            "what_they_want": "想看主角如何被卷入。",
+            "reveal_debts": ["病毒真相尚未对读者揭露"],
+        },
+        "craft_focus": {
+            "conflict": "外部调查压迫",
+            "reversal": "吊坠异常",
+            "development": "侥幸到恐惧",
+            "suspense": "信息差",
+            "other": "近距离第三人称",
+        },
+        "stages": [],
+        "cast": [
+            {
+                "id": "char_hero",
+                "billing": "lead",
+                "situation": "主角在雾城边缘苏醒，旧案阴影未散。",
+                "dramatic_impact": "将被迫面对调查并推动悬念。",
+            }
+        ],
+        "casting_note": "本卷聚焦卷入旧案",
+        "involved_ids": ["char_hero"],
+    }
+
+
 def _planner(tmp_path, llm: FakeLLM) -> Planner:
     paths = scaffold_project(tmp_path / "project", exist_ok=True)
     outline = OutlineStore(paths)
@@ -90,13 +118,14 @@ def test_plan_volume_v2_keynote_and_microscenes(tmp_path):
     n_beats = 6
     chapter_count = 2
 
-    turn1 = {
+    framework = _framework()
+    turn_outline = {
         "title": "雾起之卷",
-        "arc": "主角卷入旧案。",
+        "arc": "主角卷入旧案。" * 40,
         "ending": "真相初现。",
         "chapter_count": chapter_count,
     }
-    turn2 = {"beats": [_raw_beat(i) for i in range(1, n_beats + 1)]}
+    turn_beats = {"beats": [_raw_beat(i) for i in range(1, n_beats + 1)]}
 
     assemble = {
         "chapters": [
@@ -144,15 +173,27 @@ def test_plan_volume_v2_keynote_and_microscenes(tmp_path):
         ]
     }
 
-    # turn1, turn2, assemble, micro ch1, micro ch2
-    llm = FakeLLM([turn1, turn2, assemble, micro1, micro2])
+    # framework, outline, beats, assemble, micro×2 (no planning_entities → skip cast LLM)
+    llm = FakeLLM([framework, turn_outline, turn_beats, assemble, micro1, micro2])
     planner = _planner(tmp_path, llm)
 
     events = list(planner.plan_volume_v2(1))
-    assert any(e["data"].get("step") == 4 and e["data"].get("status") == "done" for e in events if e["event"] == "step")
+    assert any(
+        e["data"].get("step") == 5 and e["data"].get("status") == "done"
+        for e in events if e["event"] == "step"
+    )
+    assert any(
+        e["data"].get("step") == 1 and e["data"].get("status") == "done"
+        for e in events if e["event"] == "step"
+    )
 
-    # 5 LLM calls
-    assert len(llm.calls) == 5
+    fw = planner.outline.load_volume_framework(1)
+    assert fw is not None
+    assert fw.cast[0].id == "char_hero"
+    assert "卷入旧案" in fw.casting_note
+
+    assert len(llm.calls) == 6
+    assert "叙事设计师" in llm.calls[0][0]["content"]
 
     ch1 = planner.outline.read_chapter(1)
     assert ch1 is not None
@@ -163,17 +204,18 @@ def test_plan_volume_v2_keynote_and_microscenes(tmp_path):
     assert ch1.beats[0].scenes[0].intent.startswith("走廊")
     assert ch1.beats[0].scenes[0].action == ""
     assert ch1.beats[0].scenes[0].sensory
-    assert "手法：" not in (ch1.notes or "")  # no longer stuffed into notes
+    assert "手法：" not in (ch1.notes or "")
 
     beat_data = planner.outline.load_volume_beats(1)
     assert beat_data is not None
-    assert beat_data.step == 4
+    assert beat_data.step == 5
     assert beat_data.chapter_map[0].keynote
 
 
 def test_microscene_fallback_on_parse_error(tmp_path):
-    turn1 = {"title": "卷", "arc": "a", "ending": "e", "chapter_count": 1}
-    turn2 = {"beats": [_raw_beat(i) for i in range(1, 4)]}
+    framework = _framework()
+    turn_outline = {"title": "卷", "arc": "a", "ending": "e", "chapter_count": 1}
+    turn_beats = {"beats": [_raw_beat(i) for i in range(1, 4)]}
     assemble = {
         "chapters": [{
             "title": "一",
@@ -188,12 +230,12 @@ def test_microscene_fallback_on_parse_error(tmp_path):
     class Flaky(FakeLLM):
         def generate_json(self, messages, **kw):
             self.calls.append(list(messages))
-            # 4th call = microscene → fail
-            if len(self.calls) == 4:
+            # 5th call = microscene → fail
+            if len(self.calls) == 5:
                 raise ValueError("无法解析 JSON")
             return self._json_responses.pop(0)
 
-    llm = Flaky([turn1, turn2, assemble])
+    llm = Flaky([framework, turn_outline, turn_beats, assemble])
     planner = _planner(tmp_path, llm)
     list(planner.plan_volume_v2(1))
     ch = planner.outline.read_chapter(1)
@@ -235,3 +277,43 @@ def test_legacy_microscene_intent_backfill(tmp_path):
     assert ch.beats[0].scenes[0].intent == "发现异常"
     assert ch.beats[0].scenes[0].action == "推开门"
     assert ch.beats[0].scenes[0].sensory == ""
+
+
+def test_parse_framework_drops_unknown_ids_and_outline_fields():
+    raw = {
+        "title": "应被忽略",
+        "arc": "也应忽略",
+        "reader_lens": {
+            "current_perspective": "p",
+            "what_they_want": "w",
+            "reveal_debts": [],
+        },
+        "craft_focus": {},
+        "stages": [
+            {"id": "loc_gate", "why_this_stage": "主舞台", "dramatic_pressure": "压迫"},
+        ],
+        "cast": [
+            {
+                "id": "char_hero",
+                "billing": "lead",
+                "situation": "s",
+                "dramatic_impact": "i",
+            },
+            {
+                "id": "char_ghost",
+                "billing": "cameo",
+                "situation": "x",
+                "dramatic_impact": "y",
+            },
+        ],
+        "casting_note": "note",
+        "involved_ids": ["char_hero", "loc_gate", "char_ghost"],
+    }
+    fw, warnings = _parse_volume_framework(
+        raw, volume_number=1, known_ids={"char_hero", "loc_gate"},
+    )
+    assert fw.cast[0].id == "char_hero"
+    assert all(c.id != "char_ghost" for c in fw.cast)
+    assert "char_ghost" not in fw.involved_ids
+    assert any("禁止字段" in w for w in warnings)
+    assert any("未知" in w for w in warnings)

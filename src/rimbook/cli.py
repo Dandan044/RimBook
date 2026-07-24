@@ -482,7 +482,7 @@ def outline_volume(
 ) -> None:
     """规划一卷大纲（卷结构 → 设定扩充 → Beat 链 → 细化组装）。"""
     deps = _load_deps(project)
-    console.print(f"[cyan]正在规划第 {number} 卷（四步管线）…[/cyan]")
+    console.print(f"[cyan]正在规划第 {number} 卷（五步管线）…[/cyan]")
     try:
         for event in deps.planner.plan_volume_v2(number, title=title):
             kind = event.get("event")

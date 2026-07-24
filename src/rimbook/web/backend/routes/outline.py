@@ -677,6 +677,52 @@ def get_volume_beats(number: int, deps: ProjectDeps = Depends(get_project_deps))
     )
 
 
+class FrameworkReaderLensOut(BaseModel):
+    current_perspective: str = ""
+    what_they_want: str = ""
+    reveal_debts: list[str] = []
+
+
+class FrameworkCraftFocusOut(BaseModel):
+    conflict: str = ""
+    reversal: str = ""
+    development: str = ""
+    suspense: str = ""
+    other: str = ""
+
+
+class FrameworkStageOut(BaseModel):
+    id: str
+    why_this_stage: str = ""
+    dramatic_pressure: str = ""
+
+
+class FrameworkCastOut(BaseModel):
+    id: str
+    billing: str = "supporting"
+    situation: str = ""
+    dramatic_impact: str = ""
+
+
+class VolumeFrameworkOut(BaseModel):
+    volume_number: int
+    reader_lens: FrameworkReaderLensOut = FrameworkReaderLensOut()
+    craft_focus: FrameworkCraftFocusOut = FrameworkCraftFocusOut()
+    stages: list[FrameworkStageOut] = []
+    cast: list[FrameworkCastOut] = []
+    casting_note: str = ""
+    involved_ids: list[str] = []
+
+
+@router.get("/volumes/{number}/framework", response_model=VolumeFrameworkOut | None)
+def get_volume_framework(number: int, deps: ProjectDeps = Depends(get_project_deps)):
+    """Return the writing-framework briefing for a volume (Step 1), if any."""
+    data = deps.outline.load_volume_framework(number)
+    if data is None:
+        return None
+    return VolumeFrameworkOut(**data.model_dump())
+
+
 @router.put("/volumes/{number}/beats")
 def update_volume_beats(number: int, req: BeatUpdateRequest, deps: ProjectDeps = Depends(get_project_deps)) -> dict:
     """Replace the raw beat list for a volume (user edits)."""

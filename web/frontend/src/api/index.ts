@@ -422,14 +422,48 @@ export interface ChapterAssignment {
 
 export interface VolumeBeatData {
   volume: number
-  step: number  // 0=none, 2=raw beats, 3=refined+grouped
+  step: number  // 0=none, 4=raw beats, 5=refined+grouped
   raw_beats: RawBeat[]
   refined_beats: RefinedBeat[]
   chapter_map: ChapterAssignment[]
 }
 
+export interface VolumeFramework {
+  volume_number: number
+  reader_lens: {
+    current_perspective: string
+    what_they_want: string
+    reveal_debts: string[]
+  }
+  craft_focus: {
+    conflict: string
+    reversal: string
+    development: string
+    suspense: string
+    other: string
+  }
+  stages: Array<{
+    id: string
+    why_this_stage: string
+    dramatic_pressure: string
+  }>
+  cast: Array<{
+    id: string
+    billing: string
+    situation: string
+    dramatic_impact: string
+  }>
+  casting_note: string
+  involved_ids: string[]
+}
+
 export const getVolumeBeats = (projectId: string, volumeNumber: number) =>
   http.get<VolumeBeatData>(`/projects/${projectId}/outline/volumes/${volumeNumber}/beats`).then(r => r.data)
+
+export const getVolumeFramework = (projectId: string, volumeNumber: number) =>
+  http.get<VolumeFramework | null>(
+    `/projects/${projectId}/outline/volumes/${volumeNumber}/framework`,
+  ).then(r => r.data)
 
 export const updateVolumeBeats = (projectId: string, volumeNumber: number, beats: RawBeat[]) =>
   http.put<{ ok: boolean; beat_count: number }>(
@@ -599,7 +633,7 @@ export function generateFoundationSSE(
   return { close: () => ctrl.abort() }
 }
 
-/** Re-run Step 4 (refine + assemble) via SSE. */
+/** Re-run Step 5 (refine + assemble) via SSE. */
 export function assembleVolumeSSE(
   projectId: string,
   volumeNumber: number,
