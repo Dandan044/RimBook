@@ -395,7 +395,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useProjectStore } from '../stores/project'
 import {
   getSynopsis, updateSynopsis, generateFoundationSSE, getFoundationStatus,
-  listVolumes, planVolume, updateVolume, deleteVolume,
+  listVolumes, updateVolume, deleteVolume,
   listChapters, planChapter, updateChapter, regenerateChapter, deleteChapter,
   planVolumeSSE, assembleVolumeSSE, getVolumePlanStatus,
   type VolumeOutline, type ChapterOutline, type SceneBeat, type MicroScene,

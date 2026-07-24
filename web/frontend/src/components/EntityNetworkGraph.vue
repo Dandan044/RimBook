@@ -107,6 +107,10 @@ const focusId = computed(() => props.focusId || '')
 
 let graph: Graph | null = null
 let resizeObserver: ResizeObserver | null = null
+/** Ignore the next focusId watch tick after canvas clear (parent may still hold selection). */
+let highlightSuppressed = false
+let pointerDownOnCanvas = false
+let pointerDownPos: { x: number; y: number } | null = null
 
 function themeOf(type: string) {
   return TYPE_THEME[type] || TYPE_THEME.item
@@ -116,11 +120,48 @@ function nodeSize(degree: number) {
   return Math.min(92, Math.max(64, 56 + degree * 5))
 }
 
-function inNodeLabel(name: string) {
+/**
+ * Fit a CJK-heavy name inside the circle by shrinking font and wrapping up to
+ * 3 lines. Avoid G6 word-wrap/ellipsis (it under-measures CJK and truncates early).
+ */
+function layoutNodeLabel(name: string, size: number) {
   const trimmed = name.trim()
-  if (trimmed.length <= 6) return trimmed
-  if (trimmed.length <= 10) return `${trimmed.slice(0, 5)}\n${trimmed.slice(5)}`
-  return `${trimmed.slice(0, 5)}\n${trimmed.slice(5, 9)}…`
+  if (!trimmed) return { text: '', fontSize: 12, lineHeight: 15 }
+
+  const maxWidth = size * 0.78
+  const maxHeight = size * 0.72
+  const maxLines = 3
+  const minFont = 8
+  const maxFont = 13
+
+  for (let fontSize = maxFont; fontSize >= minFont; fontSize--) {
+    // Bold CJK glyphs are ~1em wide; keep a small safety margin.
+    const charW = fontSize * 1.05
+    const perLine = Math.max(1, Math.floor(maxWidth / charW))
+    const linesNeeded = Math.ceil(trimmed.length / perLine)
+    const lineHeight = Math.round(fontSize * 1.2)
+    if (linesNeeded > maxLines || linesNeeded * lineHeight > maxHeight) continue
+
+    const lines: string[] = []
+    for (let i = 0; i < trimmed.length; i += perLine) {
+      lines.push(trimmed.slice(i, i + perLine))
+    }
+    return { text: lines.join('\n'), fontSize, lineHeight }
+  }
+
+  // Last resort: min font, 3 lines, then ellipsis.
+  const fontSize = minFont
+  const charW = fontSize * 1.05
+  const perLine = Math.max(1, Math.floor(maxWidth / charW))
+  const maxChars = perLine * maxLines
+  const clipped = trimmed.length > maxChars
+    ? `${trimmed.slice(0, Math.max(1, maxChars - 1))}…`
+    : trimmed
+  const lines: string[] = []
+  for (let i = 0; i < clipped.length; i += perLine) {
+    lines.push(clipped.slice(i, i + perLine))
+  }
+  return { text: lines.join('\n'), fontSize, lineHeight: Math.round(fontSize * 1.2) }
 }
 
 function toG6Data(
@@ -132,6 +173,7 @@ function toG6Data(
     const theme = themeOf(node.type)
     const saved = positions[node.id]
     const size = nodeSize(node.degree || 0)
+    const label = layoutNodeLabel(node.name, size)
     return {
       id: node.id,
       data: {
@@ -154,16 +196,16 @@ function toG6Data(
         shadowColor: 'rgba(0, 0, 0, 0.45)',
         shadowBlur: 14,
         shadowOffsetY: 3,
-        labelText: inNodeLabel(node.name),
+        labelText: label.text,
         labelPlacement: 'center',
         labelFill: '#ffffff',
-        labelFontSize: node.name.trim().length > 6 ? 11 : 12,
+        labelFontSize: label.fontSize,
         labelFontWeight: 700,
-        labelFontFamily: 'Inter, system-ui, sans-serif',
+        labelFontFamily: '"Microsoft YaHei", "PingFang SC", "Noto Sans SC", system-ui, sans-serif',
         labelBackground: false,
-        labelWordWrap: true,
-        labelMaxWidth: size - 18,
-        labelLineHeight: 15,
+        // Manual wrapping above; G6 word-wrap + maxWidth truncates CJK too early.
+        labelWordWrap: false,
+        labelLineHeight: label.lineHeight,
         labelTextAlign: 'center',
         labelTextBaseline: 'middle',
         ports: [],
@@ -293,19 +335,10 @@ function createGraph(runLayout: boolean) {
       'zoom-canvas',
       {
         type: 'drag-element',
-        // Avoid swallowing the subsequent click-select highlight.
         enable: (event: any) => event.targetType === 'node',
       },
-      {
-        type: 'click-select',
-        key: 'click-select',
-        multiple: false,
-        degree: 1,
-        state: 'active',
-        neighborState: 'neighborActive',
-        unselectedState: 'inactive',
-        enable: (event: any) => ['node', 'canvas'].includes(event.targetType),
-      },
+      // Highlight is owned manually below — click-select races async setElementState
+      // and fights canvas clear when enable excludes canvas.
     ],
     plugins: [
       {
@@ -351,7 +384,7 @@ function createGraph(runLayout: boolean) {
   graph.on('node:click', (event: any) => {
     const id = String(event.target?.id || event.itemId || '')
     if (!id) return
-    // Explicitly highlight in case click-select is interrupted by drag handlers.
+    highlightSuppressed = false
     applyNeighborhoodHighlight(id)
     emit('select-node', id)
   })
@@ -360,11 +393,32 @@ function createGraph(runLayout: boolean) {
     if (!id || id.startsWith('implicit_world_')) return
     emit('select-edge', id)
   })
-  graph.on('canvas:click', () => {
-    clearHighlight()
-    emit('pane-click')
+  // drag-canvas often swallows canvas:click; also treat short pointerup on blank as clear.
+  graph.on('canvas:pointerdown', (event: any) => {
+    pointerDownOnCanvas = true
+    pointerDownPos = { x: Number(event.canvas?.x ?? event.client?.x ?? 0), y: Number(event.canvas?.y ?? event.client?.y ?? 0) }
+  })
+  graph.on('node:pointerdown', () => { pointerDownOnCanvas = false; pointerDownPos = null })
+  graph.on('edge:pointerdown', () => { pointerDownOnCanvas = false; pointerDownPos = null })
+  graph.on('canvas:click', () => { clearCanvasHighlight() })
+  graph.on('canvas:pointerup', (event: any) => {
+    if (!pointerDownOnCanvas) return
+    pointerDownOnCanvas = false
+    const x = Number(event.canvas?.x ?? event.client?.x ?? 0)
+    const y = Number(event.canvas?.y ?? event.client?.y ?? 0)
+    const dx = pointerDownPos ? Math.abs(x - pointerDownPos.x) : 0
+    const dy = pointerDownPos ? Math.abs(y - pointerDownPos.y) : 0
+    pointerDownPos = null
+    // Treat as click (not pan) when movement is tiny.
+    if (dx <= 4 && dy <= 4) clearCanvasHighlight()
   })
   graph.on('node:dragend', () => { void persistLayout() })
+}
+
+function clearCanvasHighlight() {
+  highlightSuppressed = true
+  clearHighlight()
+  emit('pane-click')
 }
 
 function clearHighlight() {
@@ -373,7 +427,8 @@ function clearHighlight() {
   const edgeIds = graph.getEdgeData().map(edge => String(edge.id))
   const states: Record<string, string[]> = {}
   for (const id of [...nodeIds, ...edgeIds]) states[id] = []
-  graph.setElementState(states)
+  // Disable animation so a pending click-select/state tween cannot overwrite the clear.
+  void graph.setElementState(states, false)
 }
 
 function applyNeighborhoodHighlight(nodeId: string) {
@@ -404,7 +459,7 @@ function applyNeighborhoodHighlight(nodeId: string) {
     const edgeId = String(edge.id)
     states[edgeId] = activeEdges.has(edgeId) ? ['active'] : ['inactive']
   }
-  graph.setElementState(states)
+  void graph.setElementState(states, false)
 }
 
 async function renderGraph(runLayout: boolean) {
@@ -427,7 +482,7 @@ async function renderGraph(runLayout: boolean) {
     layouting.value = false
   }
 
-  if (focusId.value) applyNeighborhoodHighlight(focusId.value)
+  if (focusId.value && !highlightSuppressed) applyNeighborhoodHighlight(focusId.value)
 }
 
 function collectPositionsFromGraph() {
@@ -534,11 +589,16 @@ watch(
   (nextFocusId) => {
     if (!graph) return
     if (focusMode.value) {
+      highlightSuppressed = false
       void reload()
       return
     }
-    if (nextFocusId) applyNeighborhoodHighlight(nextFocusId)
-    else clearHighlight()
+    if (nextFocusId) {
+      highlightSuppressed = false
+      applyNeighborhoodHighlight(nextFocusId)
+    } else {
+      clearHighlight()
+    }
   },
 )
 

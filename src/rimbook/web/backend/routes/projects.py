@@ -130,7 +130,7 @@ def create_project(req: ProjectCreate) -> ProjectInfo:
         "author": req.author,
         "language": req.language,
         "generation": {
-            "temperature": 0.85,
+            "temperature": 1.0,
             "max_tokens": 40000,
             "recent_window_chapters": 1,
             "summary_history": 6,

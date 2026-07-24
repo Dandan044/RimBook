@@ -77,10 +77,6 @@ class PlanChapterRequest(BaseModel):
     hint: str = ""
 
 
-class PlanVolumeRequest(BaseModel):
-    title: str = ""
-
-
 # ---- synopsis ----
 
 @router.get("/synopsis")
@@ -108,15 +104,6 @@ def generate_synopsis(req: SynopsisIn, deps: ProjectDeps = Depends(get_project_d
 def list_volumes(deps: ProjectDeps = Depends(get_project_deps)) -> list[VolumeOutlineOut]:
     vols = deps.outline.list_volumes()
     return [_vol_out(v) for v in vols]
-
-
-@router.post("/volumes", response_model=VolumeOutlineOut)
-def plan_volume(req: PlanVolumeRequest, deps: ProjectDeps = Depends(get_project_deps)) -> VolumeOutlineOut:
-    """LLM-plan a volume. The volume number is auto-inferred."""
-    existing = deps.outline.list_volumes()
-    number = max((v.number for v in existing), default=0) + 1
-    result = deps.planner.plan_volume(number, title=req.title)
-    return _vol_out(result.volume)
 
 
 class PlanVolumeV2Request(BaseModel):

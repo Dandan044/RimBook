@@ -13,11 +13,24 @@ from .models import (
     RelationshipArc,
     RelationshipProposal,
 )
+from .completeness import (
+    REQUIRED_TEXT_FIELDS,
+    incomplete_entry_fields,
+    merge_entry_labels,
+    partition_raw_entries,
+    render_incomplete_entries,
+)
 from .expander import (
     ExpansionBudget,
     ExpansionCandidate,
     ExpansionRunState,
     WorldExpander,
+)
+from .identity import (
+    NameRegistry,
+    core_name,
+    extract_real_names,
+    normalize_name,
 )
 from .service import (
     DETAIL_TYPE_ORDER,
@@ -37,6 +50,7 @@ __all__ = [
     "EntityNetworkChanges",
     "EntityRelationship",
     "EntityNetworkService",
+    "NameRegistry",
     "PlanningCodexChanges",
     "PlanningCodexEntry",
     "PlanningCodexService",
@@ -45,8 +59,16 @@ __all__ = [
     "PlanningEntityProposal",
     "PlanningEntityStore",
     "PlanningRelationship",
+    "REQUIRED_TEXT_FIELDS",
     "ReconcileResult",
     "RelationshipArc",
     "RelationshipProposal",
     "WorldExpander",
+    "core_name",
+    "extract_real_names",
+    "incomplete_entry_fields",
+    "merge_entry_labels",
+    "normalize_name",
+    "partition_raw_entries",
+    "render_incomplete_entries",
 ]

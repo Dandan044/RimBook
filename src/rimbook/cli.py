@@ -222,7 +222,7 @@ def init(
         "author": author,
         "language": language,
         "generation": {
-            "temperature": 0.85,
+            "temperature": 1.0,
             "max_tokens": 50000,
             "recent_window_chapters": 1,
             "summary_history": 6,
@@ -480,31 +480,43 @@ def outline_volume(
     title: str = typer.Option("", "--title", "-t"),
     project: Optional[Path] = typer.Option(None, "--project", "-p"),
 ) -> None:
-    """规划一卷大纲，并在同一次对话中生成该卷全部章节 beat。"""
+    """规划一卷大纲（卷结构 → 设定扩充 → Beat 链 → 细化组装）。"""
     deps = _load_deps(project)
-    console.print(f"[cyan]正在规划第 {number} 卷及全部章节…[/cyan]")
+    console.print(f"[cyan]正在规划第 {number} 卷（四步管线）…[/cyan]")
     try:
-        result = deps.planner.plan_volume(number, title=title)
+        for event in deps.planner.plan_volume_v2(number, title=title):
+            kind = event.get("event")
+            data = event.get("data") or {}
+            if kind == "progress":
+                msg = data.get("message") if isinstance(data, dict) else str(data)
+                if msg:
+                    console.print(f"[dim]{msg}[/dim]")
+            elif kind == "step":
+                status = data.get("status", "")
+                msg = data.get("message") or f"Step {data.get('step')} {status}"
+                style = "green" if status == "done" else "cyan"
+                console.print(f"[{style}]{msg}[/{style}]")
     except FileExistsError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1) from e
-    vol = result.volume
+
+    vol = deps.outline.read_volume(number)
+    if vol is None:
+        console.print("[red]卷规划结束，但未找到卷文件[/red]")
+        raise typer.Exit(code=1)
     console.print(Panel(vol.arc, title=f"第 {number} 卷《{vol.title}》大纲"))
     if vol.ending.strip():
         console.print(Panel(vol.ending, title="卷结局 / 衔接"))
-    if result.chapters:
+    chapters = [c for c in deps.outline.list_chapters() if c.volume == number]
+    if chapters:
         lines = [
             f"第{c.number}章《{c.title or '未命名'}》· {len(c.beats)} beats"
-            for c in result.chapters
+            for c in chapters
         ]
         console.print("[green]已生成章节：[/green]\n  " + "\n  ".join(lines))
-    if result.warnings:
-        console.print("[yellow]提示：[/yellow]")
-        for w in result.warnings:
-            console.print(f"  • {w}")
 
 
 @outline_app.command("chapter")

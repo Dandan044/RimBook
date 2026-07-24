@@ -59,15 +59,30 @@ class Prompts:
         "初始化或补充作者侧「完整设定集」。可包含秘密和真实议程；"
         "这些内容仅供规划，不得当作读者已知事实。\n"
         "六类均按需生成：character、worldbuilding、location、faction、item、timeline。\n"
+        "【必填字段硬规则——每条 entry 缺一不可】\n"
+        "- id：稳定英文/拼音 slug，且前缀与 type 一致"
+        "（char_/character_、world_、loc_/location_、faction_、item_、timeline_/evt_）；\n"
+        "- name：显示名，非空；\n"
+        "- type：必须是上述六类之一的非空字符串，严禁省略、空串或用 null；"
+        "不得只靠 id 前缀暗示类型——type 字段本身必须写出；\n"
+        "- surface_summary、narrative_role、reveal_strategy：各 1-3 句，非空；\n"
+        "- exists_at_anchor：布尔值 true/false，必须显式给出；\n"
+        "- 当 exists_at_anchor=true 时，existence_reason 必须非空；\n"
+        "- 当 exists_at_anchor=false 且不是 timeline 时，必须提供 formation_event；\n"
+        "- secret_truth 可写“无”或简短幕后信息，但字段必须存在。\n"
         "【存在性硬规则】完整设定集只收录在故事开篇锚点已经真实存在的事物。"
         "尚未被正文提及不等于不存在：一座早已存在的城市可以收录。"
         "但未来才出生的人、未来才成立的聚落/势力、未来才制造的物品不得提前建档。"
         "此类候选必须改写成 type=timeline 的未来成立事件并标记 exists_at_anchor=false；"
         "不得同时创建尚未成立的地点/势力/人物/物品条目。\n"
+        "【姓名唯一硬规则】不得与已占用姓名清单中的名称、别名或真名冲突；"
+        "也不得用括号/后缀改写同名实体来重复建档（如「净化者」与「净化者（…）」）。\n"
         "【首次登场】reveal_strategy 只描述该存在第一次进入正文的触发钩子和呈现途径，"
         "不是把它的秘密或全部历史一次性揭底。\n"
         "这是粗略建档步骤：每个字段保持1-3句，details 只放少量结构化关键词，"
         "不要在此输出长篇生平或历史，后续会逐条细化。\n"
+        "【关系类型】relationship_type 使用简短中文（如：成员、创立、隶属、盟友、敌对、位于、相关），"
+        "不要用英文 snake_case。\n"
         "【输出格式】仅输出 JSON：\n"
         '{"entries":[{"id":"稳定id","name":"名称","type":"character|worldbuilding|location|faction|item|timeline",'
         '"aliases":[],"tags":[],"surface_summary":"公开面摘要","secret_truth":"幕后真相",'
@@ -76,23 +91,57 @@ class Prompts:
         '"formation_event":null}],'
         '"relationships":[{"id":"关系id","source_id":"...","target_id":"...",'
         '"relationship_type":"...","conflict":"...","stakes":"..."}]}\n'
-        "无效条目会被跳过，但 JSON 整体必须可解析。不要输出额外文字。"
+        "缺少必填字段的条目会被二次打标或跳过；JSON 整体必须可解析。不要输出额外文字。"
     )
 
     foundation_codex_user: str = (
         "创意输入：\n{premise}\n\n"
         "宏观梗概：\n{synopsis}\n\n"
         "已有完整设定集索引：\n{existing_index}\n\n"
+        "{occupied_names}\n\n"
         "请生成需要新建或补充的完整设定集条目与跨类关系 JSON。"
+        "再次确认：每条 entry 都必须带非空 type，以及 surface_summary / narrative_role / "
+        "reveal_strategy / exists_at_anchor（及对应的 existence_reason 或 formation_event）。"
+    )
+
+    foundation_relabel_system: str = (
+        "你是小说设定档案质检员。上游建档步骤漏填了部分必填字段。"
+        "你的唯一任务：根据每条已有 id、name 与摘要语义，补全 missing_fields 列出的字段。\n"
+        "【硬规则】\n"
+        "- 不得新建条目，不得修改 id，不得合并或删除条目；\n"
+        "- type 必须是 character|worldbuilding|location|faction|item|timeline 之一，"
+        "并与语义一致（地点→location，势力→faction，物品→item，事件→timeline，"
+        "世界规则→worldbuilding，人物→character）；\n"
+        "- 只输出需要补全的条目；已完整的字段可原样回写或省略；\n"
+        "- 不要写长篇详情，每字段 1-3 句即可。\n"
+        "【输出】仅 JSON："
+        '{"entries":[{"id":"与输入相同","type":"...",'
+        '"name":"...","surface_summary":"...","narrative_role":"...",'
+        '"reveal_strategy":"...","secret_truth":"...",'
+        '"exists_at_anchor":true,"existence_reason":"...",'
+        '"formation_event":null}]}'
+    )
+    foundation_relabel_user: str = (
+        "宏观梗概：\n{synopsis}\n\n"
+        "待补全设定（含 missing_fields）：\n{incomplete_entries}\n\n"
+        "请一次性补全所有缺失字段并输出 JSON。"
     )
 
     volume_cast_system: str = (
         "你是小说幕后设定策划。根据本卷大纲、已发生剧情、完整设定集与已揭示设定集索引，"
         "扩充本卷出场设定：更新既有条目、新建必要条目、推进 volume_roles 与关系张力。"
         "字段锁定的内容不可覆盖。\n"
+        "【新建条目必填】id、name、type（六类之一，禁止空）、surface_summary、"
+        "narrative_role、reveal_strategy、exists_at_anchor；"
+        "exists_at_anchor=true 时 existence_reason 必填；"
+        "exists_at_anchor=false 且非 timeline 时 formation_event 必填。\n"
         "新建条目必须在本卷开始前的故事锚点已经真实存在；本卷中才会成立/出生/制造的存在"
         "不得提前建档，必须改写为 type=timeline、exists_at_anchor=false 的成立事件。"
         "reveal_strategy 只描述首次进入正文的钩子与呈现途径，不描述秘密揭底。\n"
+        "【姓名唯一硬规则】新建名称不得占用清单中已有姓名/别名/真名；"
+        "禁止用括号或同义改名重复建档。\n"
+        "【关系类型】relationship_type 使用简短中文（如：成员、创立、隶属、盟友、敌对、位于、相关），"
+        "不要用英文 snake_case。\n"
         "【输出格式】仅输出 JSON：\n"
         '{"entries":[{"id":"...","type":"...","name":"...",'
         '"surface_summary":"...","secret_truth":"...","narrative_role":"...",'
@@ -110,6 +159,7 @@ class Prompts:
         "已发生剧情：\n{story_context}\n\n"
         "完整设定集摘要：\n{planning_brief}\n\n"
         "已揭示设定集索引：\n{revealed_index}\n\n"
+        "{occupied_names}\n\n"
         "请输出本卷设定扩充 JSON（entries + relationships）。"
     )
 
@@ -119,6 +169,8 @@ class Prompts:
         "误当成全部真相。只提出有明确剧情依据或规划必要性的变更，避免为同一实体重复建档。\n"
         "禁止为尚未实际成立的未来存在提前建档；它只能先作为 timeline 成立事件记录。"
         "reveal_strategy 只表示该存在首次进入正文的方式。\n"
+        "【关系类型】relationship_type 使用简短中文（如：成员、创立、隶属、盟友、敌对、位于、相关），"
+        "不要用英文 snake_case。\n"
         "【输出格式】仅输出 JSON："
         '{"entries":[{"id":"稳定 id","name":"名称","type":"character|worldbuilding|location|faction|item|timeline",'
         '"narrative_role":"...","surface_summary":"...","secret_truth":"...",'
@@ -169,6 +221,8 @@ class Prompts:
         "每个结构化角色字段都必须有传记证据支撑，避免空泛标签和人格清单。"
         "details_patch 必须优先使用以下稳定英文键：inner_need、fear、flaw、values、"
         "capabilities、limitations、voice、action_style、key_experiences。"
+        "【姓名硬规则】若角色仅有代号/外号，信息不足时不要发明与已占用清单冲突的真名/本名；"
+        "必须起真名时也严禁复用其他角色、势力或条目已占用的姓名。"
         "通常 1000-2200 字，主角可更长。"
     )
     codex_detail_item_system: str = (
@@ -184,7 +238,8 @@ class Prompts:
         "禁止出现“未来走向”式代写剧情，也不要替角色完成尚未发生的选择。\n"
         "【一致性硬规则】上下文中的专名、年龄、亲属、日期、数值与因果是硬约束。"
         "缺少信息时保持概括，不要另造姓名或数字；输出前请在内部逐项核对相关设定，"
-        "尤其避免同一人物的父母姓名、年龄和事件日期互相冲突。\n"
+        "尤其避免同一人物的父母姓名、年龄和事件日期互相冲突。"
+        "禁止把已占用姓名清单中的名字用作其他人物的真名/本名。\n"
         "请只输出 JSON："
         '{{"detail":"完整 Markdown 详情正文",'
         '"details_patch":{{"按类型补齐的结构化字段":"值"}}}}。'
@@ -200,15 +255,18 @@ class Prompts:
         "- 必须能引用输入详情中的明确证据；纯氛围路人、无职责成员、一次性装饰不得入选；\n"
         "- 九人组织不等于九人都建档，只选择创始人、关键决策者、冲突轴人物；\n"
         "- 候选必须解释现有因果、承担叙事职责或连接两个重要设定；\n"
-        "- 已有完整设定集中的同名、别名或同一存在不得重复创建；\n"
+        "- 已有完整设定集中的同名、别名、核名相同或仅括号/后缀改写的存在不得重复创建；\n"
+        "- 每个候选必须带非空 type（六类之一）与非空 name，禁止省略 type；\n"
         "- 未来才出生/成立/制造的存在不得建本体，只能输出 type=timeline、"
         "exists_at_anchor=false 的成立事件；\n"
-        "- 每个候选至少关联一个 source_entry_id，并给出关系类型。\n"
+        "- 每个候选至少关联一个 source_entry_id，并给出关系类型；"
+        "relationship_type 使用简短中文（如：成员、创立、隶属、创造、导致、相关），"
+        "不要用英文 snake_case，可用合理中文近义词。\n"
         "【输出】仅输出 JSON："
         '{"candidates":[{"provisional_id":"稳定类型前缀_id","name":"名称",'
         '"type":"character|worldbuilding|location|faction|item|timeline",'
         '"source_entry_ids":["来源id"],"evidence":"详情中的证据",'
-        '"importance":"为何值得独立建档","relationship_type":"member_of|founded|controlled_by|created_by|caused_by|related",'
+        '"importance":"为何值得独立建档","relationship_type":"成员|创立|隶属|创造|导致|相关",'
         '"relatedness":0.0,"exists_at_anchor":true,"existence_reason":"",'
         '"formation_event":null,"aliases":[],"tags":[],"surface_summary":"1-2句",'
         '"secret_truth":"","narrative_role":"","reveal_strategy":"首次进入正文的方式",'
@@ -217,6 +275,7 @@ class Prompts:
     world_expand_user: str = (
         "全书宏观梗概：\n{synopsis}\n\n"
         "已有完整设定集索引（禁止重复）：\n{existing_index}\n\n"
+        "{occupied_names}\n\n"
         "本批种子详情：\n{seed_context}\n\n"
         "发散系数：{coefficient}；当前深度：{depth}/{max_depth}；"
         "每个种子最多候选：{max_candidates_per_seed}；"
@@ -251,55 +310,8 @@ class Prompts:
         "按系统提示仅输出 JSON（含 title、arc、ending、chapter_count）。"
     )
 
-    volume_chapters_system: str = (
-        "你是一位资深小说策划。根据已确定的卷大纲（title/arc/ending）与上下文，"
-        "为本卷一次性产出全部章节的「章节 beat」。要求：每章列出 3-6 个场景的"
-        "目标(goal)、冲突(conflict)、结果(outcome)，并在每个场景的 entities 字段"
-        "标注涉及的实体/地点/设定 id；同时给出本章级的 entities 与 tags，以及本章"
-        "应埋/回收的伏笔(写入 notes)。\n"
-        "【节奏与结构 —— 重要】每章同时给出：\n"
-        "- purpose：本章的叙事功能（推进主线/塑造角色/铺垫/转折/喘息等，一句话）；\n"
-        "- value_shift：本章的情感价值转变（如 \"希望→绝望\"、\"孤立→结盟\"）；\n"
-        "- tension：张力等级（1-5 整数）。章与章之间形成起伏，避免连续多章同一强度；\n"
-        "- hook：章末钩子；\n"
-        "- story_date：本章故事内时间点，与 elapsed：距上一章经过的时间。"
-        "必须与上一章时间点保持先后顺序一致。\n"
-        "【卷内衔接】章与章必须有因果衔接，整卷张力起伏，并共同服务本卷 ending。\n"
-        "【情节线索】若用户消息提供了「未回收的情节线索」，请在规划时明确推进或"
-        "回收哪些线索（写入 notes）。\n"
-        "【实体 id 规则 —— 极其重要】\n"
-        "用户消息会提供「已有实体清单」。你必须在 entities 字段中复用清单里已有的 id，"
-        "禁止为同一实体编造新的 id。\n"
-        "- 引用已存在的实体/地点/设定时，必须使用清单中的原始 id。\n"
-        "- 仅当本章确实首次出现清单中不存在的新实体时，才用 new: 前缀标注其 id。\n"
-        "- 切勿对同一实体在不同场景使用不同 id。\n"
-        "【输出格式】仅输出一个 JSON 对象：\n"
-        '  {"chapters": [\n'
-        '    {"title": "...", "entities": ["id", ...], "tags": ["...", ...],'
-        ' "notes": "...",\n'
-        '     "purpose": "...", "value_shift": "...", "tension": 3, "hook": "...",\n'
-        '     "story_date": "...", "elapsed": "...",\n'
-        '     "beats": [{"goal": "...", "conflict": "...", "outcome": "...",'
-        ' "entities": ["id", ...]}, ...]}\n'
-        "  ]}\n"
-        "不要输出章号（number）；不要输出任何额外文字或代码块标记。"
-    )
-
-    volume_chapters_user: str = (
-        "本卷标题：{volume_title}\n"
-        "本卷弧线：\n{volume_arc}\n\n"
-        "本卷收束（ending）：\n{volume_ending}\n\n"
-        "{entity_registry_block}"
-        "{open_threads_block}"
-        "请为本卷生成恰好 {chapter_count} 章的章节 beat（从第 {start_chapter_number} 章起，"
-        "由调用方分配章号，你无需也不要输出 number）。\n"
-        "章与章须因果衔接、张力起伏，并服务本卷 ending；"
-        "严格遵循系统提示中的实体 id 复用规则，仅输出 "
-        '{{"chapters": [...]}} JSON，且 chapters.length 必须等于 {chapter_count}。'
-    )
-
     # ------------------------------------------------------------------
-    # Volume planning v2: continuous beat chain → refine → assemble
+    # Volume planning: continuous beat chain → refine → assemble
     # ------------------------------------------------------------------
     volume_beats_system: str = (
         "你是一位叙事分镜师。根据已确定的卷大纲（title/arc/ending），为本卷生成一条"

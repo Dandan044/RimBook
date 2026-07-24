@@ -106,7 +106,7 @@ class LLMConfig(BaseModel):
 class GenerationConfig(BaseModel):
     """Knobs that control context assembly and the write-check loop."""
 
-    temperature: float = 0.85
+    temperature: float = 1.0
     max_tokens: int = 40000
     recent_window_chapters: int = 1
     summary_history: int = 6
@@ -227,7 +227,7 @@ def load_config(project_dir: Path, *, global_cfg: dict[str, Any] | None = None) 
     # --- Generation ------------------------------------------------------
     gen_raw = project_raw.get("generation", {}) or {}
     generation = GenerationConfig(
-        temperature=gen_raw.get("temperature", 0.85),
+        temperature=gen_raw.get("temperature", 1.0),
         max_tokens=gen_raw.get("max_tokens", 40000),
         recent_window_chapters=gen_raw.get("recent_window_chapters", 1),
         summary_history=gen_raw.get("summary_history", 6),

@@ -34,9 +34,13 @@ from ..planning_entities import (
     PlanningCodexChanges,
     PlanningCodexService,
     WorldExpander,
+    incomplete_entry_fields,
+    merge_entry_labels,
+    partition_raw_entries,
+    render_incomplete_entries,
 )
 
-__all__ = ["Planner", "ChapterPlanResult", "VolumePlanResult"]
+__all__ = ["Planner", "ChapterPlanResult"]
 
 
 @dataclass
@@ -47,15 +51,6 @@ class ChapterPlanResult:
     resolved_ids: list[str] = field(default_factory=list)
     new_entity_ids: list[str] = field(default_factory=list)
     id_warnings: list[str] = field(default_factory=list)
-
-
-@dataclass
-class VolumePlanResult:
-    """Outcome of planning a volume together with its chapter beats."""
-
-    volume: VolumeOutline
-    chapters: list[ChapterOutline]
-    warnings: list[str] = field(default_factory=list)
 
 
 class Planner:
@@ -139,6 +134,7 @@ class Planner:
                     premise=premise,
                     synopsis=synopsis,
                     existing_index=existing_index,
+                    occupied_names=self.planning_entities.occupied_names_block(),
                 ),
             )
             with self.trace.begin("foundation_codex", project=self.project_name) as t:
@@ -167,9 +163,23 @@ class Planner:
             raw_entries = data.get("entries") if isinstance(data, dict) else []
             if not isinstance(raw_entries, list):
                 raw_entries = []
-            reconcile = self.planning_entities.apply_foundation_entries(
-                raw_entries, source="foundation", require_existence=True,
+            ready_entries, label_warnings = self._relabel_incomplete_entries(
+                raw_entries,
+                synopsis=synopsis,
+                require_existence=True,
+                stage="foundation_relabel",
             )
+            if label_warnings:
+                yield {"event": "progress", "data": {
+                    "step": 2,
+                    "phase": "foundation_relabel",
+                    "message": "；".join(label_warnings[:6]),
+                    "warnings": label_warnings,
+                }}
+            reconcile = self.planning_entities.apply_foundation_entries(
+                ready_entries, source="foundation", require_existence=True,
+            )
+            reconcile.warnings[:0] = label_warnings
             rel_changes = PlanningCodexChanges.from_payload(data)
             if rel_changes.relationships:
                 rel_result = self.planning_entities.reconcile(
@@ -206,6 +216,77 @@ class Planner:
                 "step": 2, "status": "done",
                 "message": "未启用完整设定集服务，跳过设定初始化",
             }}
+
+    def _relabel_incomplete_entries(
+        self,
+        raw_entries: list,
+        *,
+        synopsis: str,
+        require_existence: bool = True,
+        stage: str = "foundation_relabel",
+    ) -> tuple[list[dict], list[str]]:
+        """Batch-ask the model to fill missing required fields; never invent type=character."""
+        warnings: list[str] = []
+        complete, incomplete = partition_raw_entries(
+            raw_entries,
+            require_existence=require_existence,
+        )
+        if not incomplete:
+            return complete, warnings
+
+        warnings.append(
+            f"检测到 {len(incomplete)} 条设定缺少必填字段，正在一次性补全…"
+        )
+        messages = self.llm.as_chat(
+            system=self.prompts.foundation_relabel_system,
+            user=self.prompts.foundation_relabel_user.format(
+                synopsis=synopsis or "",
+                incomplete_entries=render_incomplete_entries(incomplete),
+            ),
+        )
+        patches_by_id: dict[str, dict] = {}
+        with self.trace.begin(stage, project=self.project_name) as trace:
+            try:
+                labeled = self.llm.generate_json(
+                    messages,
+                    temperature=0.2,
+                    max_tokens=8000,
+                )
+                trace.record(messages, labeled, model=self.llm.default_model)
+            except ValueError as exc:
+                trace.record(
+                    messages,
+                    None,
+                    model=self.llm.default_model,
+                    warnings=[f"必填字段补全 JSON 解析失败: {exc}"],
+                )
+                warnings.append(f"必填字段补全失败，将跳过不完整条目: {exc}")
+                labeled = {}
+        for item in (labeled.get("entries") if isinstance(labeled, dict) else None) or []:
+            if not isinstance(item, dict):
+                continue
+            entry_id = str(item.get("id") or "").strip()
+            if entry_id:
+                patches_by_id[entry_id] = item
+
+        repaired: list[dict] = []
+        for item in incomplete:
+            entry_id = str(item.get("id") or "").strip() or "?"
+            merged = merge_entry_labels(item, patches_by_id.get(entry_id) or {})
+            still_missing = incomplete_entry_fields(
+                merged, require_existence=require_existence,
+            )
+            if still_missing:
+                warnings.append(
+                    f"跳过 {entry_id}：补全后仍缺 {', '.join(still_missing)}"
+                )
+                continue
+            repaired.append(merged)
+
+        warnings.append(
+            f"必填字段补全完成：成功 {len(repaired)}/{len(incomplete)}"
+        )
+        return complete + repaired, warnings
 
     def generate_codex_details(
         self,
@@ -450,6 +531,7 @@ class Planner:
                         existing_index=self.planning_entities.render_index(
                             max_per_type=80
                         ),
+                        occupied_names=self.planning_entities.occupied_names_block(),
                         seed_context=seed_context,
                         coefficient=coefficient,
                         depth=depth,
@@ -628,119 +710,7 @@ class Planner:
         return "\n\n".join(blocks)
 
     # ------------------------------------------------------------------
-    # Volumes
-    # ------------------------------------------------------------------
-    def plan_volume(
-        self, number: int, *, title: str = "", persist: bool = True
-    ) -> VolumePlanResult:
-        """Batch-plan a volume and all its chapter beats in one conversation.
-
-        Turn 1 returns structured volume JSON (title/arc/ending/chapter_count);
-        turn 2 continues the same chat history and returns all chapter beats.
-        Nothing is written until both rounds parse successfully.
-        """
-        if self.outline.read_volume(number) is not None:
-            raise FileExistsError(f"第 {number} 卷已存在，禁止重复规划")
-
-        synopsis = self.outline.read_synopsis().strip()
-        existing = self.outline.list_volumes()
-        existing_desc = _format_existing_volumes(existing)
-
-        # Prior-chapter recaps: build on what actually happened, not just on
-        # prior volume arcs. Cap to the most recent 8 chapters to bound length.
-        prev = self.outline.list_chapters()
-        prev_recap = _format_prev_chapters(prev[-8:]) if prev else ""
-        entity_registry = self._format_entity_registry()
-        # Open threads up to the latest written chapter — the volume should
-        # advance or resolve them rather than letting them dangle.
-        max_chapter = max((c.number for c in prev), default=0)
-        open_threads = self._format_open_threads(max_chapter + 1)
-
-        entity_registry_block = f"{entity_registry}\n\n" if entity_registry else ""
-        open_threads_block = (
-            f"未回收的情节线索（本卷应推进或回收，不得遗忘）：\n{open_threads}\n\n"
-            if open_threads
-            else ""
-        )
-
-        turn1_user = self.prompts.volume_user.format(
-            synopsis=synopsis,
-            existing_desc=existing_desc or "（无）",
-            prev_recap_block=(
-                f"前卷已写章节回顾（请与本卷衔接，避免重复或断层）：\n{prev_recap}\n\n"
-                if prev_recap
-                else ""
-            ),
-            entity_registry_block=entity_registry_block,
-            open_threads_block=open_threads_block,
-            number=number,
-            title_hint=(f"（标题：{title}）" if title else ""),
-        )
-        messages = self.llm.as_chat(
-            system=self.prompts.volume_system,
-            user=turn1_user,
-        )
-        with self.trace.begin("volume", project=self.project_name, volume=number) as t:
-            vol_data = self.llm.generate_json(messages, temperature=0.7)
-            t.record(messages, vol_data, model=self.llm.default_model)
-
-        vol_title, arc, ending, chapter_count, warnings = _parse_volume_json(
-            vol_data, number=number, title_hint=title
-        )
-
-        start_number = self.outline.last_chapter_number() + 1
-        history = [
-            {"role": "user", "content": turn1_user},
-            {
-                "role": "assistant",
-                "content": json.dumps(dict(vol_data), ensure_ascii=False),
-            },
-        ]
-        messages2 = self.llm.as_chat(
-            system=self.prompts.volume_chapters_system,
-            user=self.prompts.volume_chapters_user.format(
-                chapter_count=chapter_count,
-                volume_title=vol_title,
-                volume_arc=arc,
-                volume_ending=ending,
-                start_chapter_number=start_number,
-                entity_registry_block=entity_registry_block,
-                open_threads_block=open_threads_block,
-            ),
-            history=history,
-        )
-        with self.trace.begin(
-            "volume_chapters", project=self.project_name, volume=number
-        ) as t:
-            ch_data = self.llm.generate_json(messages2, temperature=0.7)
-            t.record(messages2, ch_data, model=self.llm.default_model)
-
-        chapters, w2 = _parse_volume_chapters_json(
-            ch_data,
-            volume=number,
-            start_number=start_number,
-            expected_count=chapter_count,
-            codex=self.codex,
-        )
-        warnings.extend(w2)
-
-        vol = VolumeOutline(
-            number=number,
-            title=vol_title,
-            arc=arc,
-            ending=ending,
-            chapters=[c.number for c in chapters],
-            recap="",
-        )
-        if persist:
-            self.outline.write_volume(vol)
-            for ch in chapters:
-                self.outline.write_chapter(ch)
-            self.outline.sync_volume_chapters(number)
-        return VolumePlanResult(volume=vol, chapters=chapters, warnings=warnings)
-
-    # ------------------------------------------------------------------
-    # Volumes v2: beat chain → refine → assemble
+    # Volumes: beat chain → refine → assemble
     # ------------------------------------------------------------------
     def plan_volume_v2(
         self, number: int, *, title: str = ""
@@ -788,7 +758,7 @@ class Planner:
         )
         messages = self.llm.as_chat(system=self.prompts.volume_system, user=turn1_user)
         with self.trace.begin("volume_v2", project=self.project_name, volume=number) as t:
-            vol_data = self.llm.generate_json(messages, temperature=0.7)
+            vol_data = self.llm.generate_json(messages, temperature=1.0)
             t.record(messages, vol_data, model=self.llm.default_model)
 
         vol_title, arc, ending, chapter_count, warnings = _parse_volume_json(
@@ -825,17 +795,25 @@ class Planner:
                     story_context=story_context,
                     planning_brief=self._format_planning_entity_brief(volume=number),
                     revealed_index=self._format_revealed_codex_index(),
+                    occupied_names=self.planning_entities.occupied_names_block(),
                 ),
             )
             with self.trace.begin("volume_cast", project=self.project_name, volume=number) as t:
-                cast_data = self.llm.generate_json(cast_messages, temperature=0.4)
+                cast_data = self.llm.generate_json(cast_messages, temperature=1.0)
                 t.record(cast_messages, cast_data, model=self.llm.default_model)
             raw_entries = cast_data.get("entries") if isinstance(cast_data, dict) else []
             if not isinstance(raw_entries, list):
                 raw_entries = []
-            cast_result = self.planning_entities.apply_foundation_entries(
-                raw_entries, source="volume_cast", require_existence=True,
+            ready_entries, label_warnings = self._relabel_incomplete_entries(
+                raw_entries,
+                synopsis=synopsis,
+                require_existence=True,
+                stage="volume_cast_relabel",
             )
+            cast_result = self.planning_entities.apply_foundation_entries(
+                ready_entries, source="volume_cast", require_existence=True,
+            )
+            cast_result.warnings[:0] = label_warnings
             rel_changes = PlanningCodexChanges.from_payload(cast_data)
             if rel_changes.relationships:
                 rel_result = self.planning_entities.reconcile(
@@ -881,7 +859,7 @@ class Planner:
             history=history,
         )
         with self.trace.begin("volume_beats", project=self.project_name, volume=number) as t:
-            beats_data = self.llm.generate_json(messages2, temperature=0.7)
+            beats_data = self.llm.generate_json(messages2, temperature=1.0)
             t.record(messages2, beats_data, model=self.llm.default_model)
 
         raw_beats, beat_warnings = _parse_raw_beats(
@@ -994,7 +972,7 @@ class Planner:
         )
         with self.trace.begin("beat_assemble", project=self.project_name, volume=number) as t:
             assemble_data = self.llm.generate_json(
-                messages_assemble, temperature=0.5, max_tokens=16000,
+                messages_assemble, temperature=1.0, max_tokens=16000,
             )
             t.record(messages_assemble, assemble_data, model=self.llm.default_model)
 
@@ -1112,7 +1090,7 @@ class Planner:
             chapter_title=ca.title,
         ) as t:
             try:
-                data = self.llm.generate_json(messages, temperature=0.5, max_tokens=8000)
+                data = self.llm.generate_json(messages, temperature=1.0, max_tokens=8000)
                 t.record(messages, data, model=self.llm.default_model)
             except ValueError as exc:
                 t.record(messages, None, model=self.llm.default_model, warnings=[str(exc)])
@@ -1483,44 +1461,6 @@ def _parse_volume_json(
         chapter_count = clamped
 
     return title, arc, ending, chapter_count, warnings
-
-
-def _parse_volume_chapters_json(
-    data: dict,
-    *,
-    volume: int,
-    start_number: int,
-    expected_count: int,
-    codex: CodexStore | None,
-) -> tuple[list[ChapterOutline], list[str]]:
-    """Parse a ``chapters`` array; assign numbers ``start_number``.. sequentially.
-
-    Reuses :func:`_parse_chapter_json` per item. Raises ``ValueError`` when the
-    array length does not match ``expected_count``.
-    """
-    raw = data.get("chapters")
-    if not isinstance(raw, list):
-        raise ValueError("卷章节规划缺少 chapters 数组")
-    if len(raw) != expected_count:
-        raise ValueError(
-            f"卷章节数量不符：期望 {expected_count}，实际 {len(raw)}"
-        )
-
-    chapters: list[ChapterOutline] = []
-    warnings: list[str] = []
-    for i, item in enumerate(raw):
-        if not isinstance(item, dict):
-            raise ValueError(f"第 {i + 1} 个章节项不是对象")
-        chapter, w = _parse_chapter_json(
-            start_number + i,
-            item,
-            volume=volume,
-            title="",
-            codex=codex,
-        )
-        chapters.append(chapter)
-        warnings.extend(w)
-    return chapters, warnings
 
 
 def _parse_chapter_json(

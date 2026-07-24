@@ -37,13 +37,35 @@ def plan_synopsis():
 
 
 def plan_volume():
-    print("\n=== 2. Plan volume ===")
-    r = api("POST", f"/projects/{PID}/outline/volumes", json={
-        "number": 1, "title": "沙漠古城",
-    })
-    d = r.json()
-    print(f"  Volume arc: {len(d.get('arc',''))} chars")
-    return d
+    print("\n=== 2. Plan volume (v2 SSE) ===")
+    url = f"{BASE}/projects/{PID}/outline/volumes/plan"
+    with ss.post(url, json={"title": "沙漠古城"}, stream=True) as r:
+        r.raise_for_status()
+        current_event = None
+        for line in r.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if line.startswith("event: "):
+                current_event = line[7:].strip()
+            elif line.startswith("data: "):
+                data_str = line[6:]
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    data = data_str
+                if current_event in ("progress", "step"):
+                    msg = data.get("message", data) if isinstance(data, dict) else data
+                    print(f"  [{current_event}] {msg}")
+                elif current_event == "error":
+                    raise RuntimeError(f"volume plan failed: {data}")
+                elif current_event == "done":
+                    print("  ✅ Volume plan done")
+                    break
+    vols = api("GET", f"/projects/{PID}/outline/volumes").json()
+    if not vols:
+        raise RuntimeError("volume plan finished but no volume found")
+    print(f"  Volume arc: {len(vols[0].get('arc', ''))} chars")
+    return vols[0]
 
 
 def plan_chapter(num, title):

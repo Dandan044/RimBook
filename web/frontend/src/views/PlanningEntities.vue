@@ -183,9 +183,10 @@
         v-if="relationView === 'graph' && store.currentId"
         ref="graphRef"
         :project-id="store.currentId"
-        :focus-id="selectedId || undefined"
+        :focus-id="graphFocusId || undefined"
         @select-node="onGraphSelectNode"
         @select-edge="onGraphSelectEdge"
+        @pane-click="onGraphPaneClick"
       />
 
       <div v-else-if="relationships.length" class="relationship-list">
@@ -260,7 +261,8 @@
 
 <script setup lang="ts">
 import { computed, defineComponent, h, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElIcon, ElMessage, ElMessageBox } from 'element-plus'
+import { Lock, Unlock } from '@element-plus/icons-vue'
 import { useProjectStore } from '../stores/project'
 import EntityNetworkGraph from '../components/EntityNetworkGraph.vue'
 import {
@@ -275,14 +277,20 @@ const LockableField = defineComponent({
   props: { label: String, field: String, locked: Boolean },
   emits: ['toggle'],
   setup(props, { emit, slots }) {
-    return () => h('div', { class: 'lockable-field' }, [
+    return () => h('div', { class: ['lockable-field', { 'is-locked': props.locked }] }, [
       h('div', { class: 'lockable-label' }, [
-        h('span', props.label),
+        h('span', { class: 'lockable-label-text' }, props.label),
         h('button', {
           class: { 'field-lock': true, active: props.locked },
           type: 'button',
+          title: props.locked ? '已锁定，AI 不可覆盖 · 点击取消' : '锁定此字段，防止 AI 覆盖',
+          'aria-label': props.locked ? '取消字段锁定' : '锁定字段',
+          'aria-pressed': String(!!props.locked),
           onClick: () => emit('toggle', props.field),
-        }, props.locked ? '已锁' : '锁定'),
+        }, [
+          h(ElIcon, { class: 'field-lock-icon', size: 13 }, () => h(props.locked ? Lock : Unlock)),
+          h('span', { class: 'field-lock-text' }, props.locked ? '锁定' : '保护'),
+        ]),
       ]),
       slots.default?.(),
     ])
@@ -303,6 +311,8 @@ const entries = ref<PlanningCodexEntry[]>([])
 const relationships = ref<EntityRelationship[]>([])
 const activeType = ref('character')
 const selectedId = ref('')
+/** Graph neighborhood focus; cleared on blank-canvas click without wiping dossier selection. */
+const graphFocusId = ref('')
 const draft = ref<PlanningCodexEntry | null>(null)
 const charDetails = reactive({
   inner_need: '',
@@ -416,12 +426,18 @@ function onGraphSelectNode(id: string) {
   const entry = entries.value.find(item => item.id === id)
   if (!entry) return
   activeType.value = entry.type
+  graphFocusId.value = id
   selectEntry(entry)
 }
 
 function onGraphSelectEdge(id: string) {
   const relationship = relationships.value.find(item => item.id === id)
   if (relationship) editRelationship(relationship)
+}
+
+/** Clear graph focus only; keep left-panel dossier selection for editing. */
+function onGraphPaneClick() {
+  graphFocusId.value = ''
 }
 
 function openExpandDialog() {
@@ -458,15 +474,18 @@ async function runExpand() {
 
 function onTypeChange() {
   selectedId.value = ''
+  graphFocusId.value = ''
   draft.value = null
 }
 function selectEntry(entry: PlanningCodexEntry) {
   selectedId.value = entry.id
+  graphFocusId.value = entry.id
   draft.value = copy(entry)
   syncCharDetailsFromDraft()
 }
 function createEntry() {
   selectedId.value = ''
+  graphFocusId.value = ''
   draft.value = blankEntry()
   syncCharDetailsFromDraft()
 }
@@ -489,6 +508,7 @@ async function saveEntry() {
     const index = entries.value.findIndex(e => e.id === saved.id)
     if (index >= 0) entries.value[index] = saved; else entries.value.push(saved)
     selectedId.value = saved.id
+    graphFocusId.value = saved.id
     draft.value = copy(saved)
     syncCharDetailsFromDraft()
     ElMessage.success('设定条目已保存')
@@ -501,7 +521,10 @@ async function removeEntry() {
   try {
     await ElMessageBox.confirm(`删除「${draft.value.name}」也会删除关联关系，是否继续？`, '删除条目', { type: 'warning' })
     await deletePlanningEntry(store.currentId, draft.value.id)
-    selectedId.value = ''; draft.value = null; await loadNetwork()
+    selectedId.value = ''
+    graphFocusId.value = ''
+    draft.value = null
+    await loadNetwork()
     ElMessage.success('已删除')
   } catch { /* cancelled */ }
 }
@@ -634,7 +657,67 @@ onUnmounted(() => detailSse?.close())
 .detail-progress { margin-bottom: 12px; }
 .type-tabs { margin-bottom: 12px; }
 .workbench-grid { display: grid; grid-template-columns: 286px minmax(0, 1fr); min-height: 620px; gap: 16px; }.entity-roster, .entity-dossier, .empty-dossier, .relationship-panel { border: 1px solid var(--rb-border-light); border-radius: 14px; background: var(--rb-bg-surface); box-shadow: 0 1px 2px rgba(0,0,0,.04); }.entity-roster { display: flex; flex-direction: column; overflow: hidden; }.roster-head { display: flex; justify-content: space-between; padding: 17px 16px 10px; font-weight: 700; }.entity-search { padding: 0 12px 12px; box-sizing: border-box; }.roster-list { padding: 6px; overflow: auto; flex: 1; }.roster-item { border: 0; width: 100%; background: transparent; text-align: left; display: flex; align-items: center; padding: 10px; gap: 10px; border-radius: 10px; cursor: pointer; color: inherit; }.roster-item:hover { background: var(--rb-bg-subtle); }.roster-item.active { background: var(--rb-primary-bg); }.entity-mark { width: 31px; height: 31px; display: grid; place-items: center; border-radius: 9px; background: var(--rb-bg-subtle); color: var(--rb-primary); font-weight: 700; }.active .entity-mark { background: var(--rb-primary); color: #fff; }.roster-copy { min-width: 0; flex: 1; display: grid; gap: 3px; }.roster-copy strong, .roster-copy small { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }.roster-copy small, .lock-count { color: var(--rb-text-muted); font-size: 12px; }.lock-count { display: flex; align-items: center; gap: 3px; }.empty-roster, .relationship-empty { padding: 28px 18px; color: var(--rb-text-muted); font-size: 13px; line-height: 1.7; text-align: center; }
-.entity-dossier { padding: 22px 26px; overflow: auto; }.dossier-top { border-bottom: 1px solid var(--rb-border-light); padding-bottom: 18px; }.name-input :deep(input) { padding: 0; height: 38px; border: 0; background: transparent; font-size: 28px; font-weight: 700; letter-spacing: -.04em; box-shadow: none; }.dossier-form { padding-top: 18px; }.identity-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }.dossier-section { padding: 18px 0; border-top: 1px solid var(--rb-border-light); }.section-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; font-weight: 700; }.section-title small { color: var(--rb-text-muted); font-size: 12px; font-weight: 400; }.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }.lockable-label { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--rb-text-secondary); margin-bottom: 7px; }.field-lock { border: 0; background: transparent; color: var(--rb-text-muted); font-size: 11px; cursor: pointer; padding: 2px 5px; border-radius: 4px; }.field-lock:hover, .field-lock.active { color: var(--rb-primary); background: var(--rb-primary-bg); }.detail-section { position: relative; }.detail-section :deep(textarea) { line-height: 1.8; font-family: var(--rb-font); }.field-help { margin: 9px 0 0; color: var(--rb-text-muted); font-size: 12px; line-height: 1.6; }.structured-json :deep(textarea) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; line-height: 1.55; }.secret-section { background: color-mix(in srgb, var(--rb-primary-bg) 35%, transparent); margin: 0 -10px; padding: 16px 10px; border-radius: 10px; }.empty-dossier { display: grid; place-content: center; text-align: center; padding: 40px; }.empty-dossier :deep(.el-icon) { font-size: 42px; color: var(--rb-primary); margin: auto; }.empty-dossier h2 { margin: 15px 0 7px; }.empty-dossier p { color: var(--rb-text-secondary); margin: 0 0 18px; }
+.entity-dossier { padding: 22px 26px; overflow: auto; }.dossier-top { border-bottom: 1px solid var(--rb-border-light); padding-bottom: 18px; }.name-input :deep(input) { padding: 0; height: 38px; border: 0; background: transparent; font-size: 28px; font-weight: 700; letter-spacing: -.04em; box-shadow: none; }.dossier-form { padding-top: 18px; }.identity-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }.dossier-section { padding: 18px 0; border-top: 1px solid var(--rb-border-light); }.section-title { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; font-weight: 700; }.section-title small { color: var(--rb-text-muted); font-size: 12px; font-weight: 400; }.field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }:deep(.lockable-label) {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--rb-text-secondary);
+  margin-bottom: 7px;
+}
+:deep(.lockable-label-text) { min-width: 0; }
+:deep(.field-lock) {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  height: 26px;
+  margin: -3px 0;
+  padding: 0 12px 0 9px;
+  border: 1px solid var(--rb-border);
+  border-radius: 999px;
+  background: var(--rb-bg-surface);
+  color: var(--rb-text-secondary);
+  font: 600 11px/1 var(--rb-font);
+  letter-spacing: .03em;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, .04);
+  transition:
+    color var(--rb-transition-fast),
+    background var(--rb-transition-fast),
+    border-color var(--rb-transition-fast),
+    box-shadow var(--rb-transition-fast),
+    transform var(--rb-transition-fast);
+}
+:deep(.field-lock:hover) {
+  border-color: var(--rb-border-strong, var(--rb-border));
+  background: var(--rb-bg-subtle);
+  color: var(--rb-text);
+}
+:deep(.field-lock:focus-visible) {
+  outline: 2px solid color-mix(in srgb, var(--rb-primary) 45%, transparent);
+  outline-offset: 1px;
+}
+:deep(.field-lock:active) { transform: scale(.97); }
+:deep(.field-lock.active) {
+  border-color: color-mix(in srgb, var(--rb-primary) 35%, transparent);
+  background: var(--rb-primary);
+  color: #fff;
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--rb-primary) 35%, transparent);
+}
+:deep(.field-lock.active:hover),
+:deep(.lockable-field.is-locked:hover .field-lock.active) {
+  background: var(--rb-primary-dark, var(--rb-primary));
+  border-color: transparent;
+}
+:deep(.field-lock-icon) { display: flex; }
+:deep(.field-lock-text) { user-select: none; }
+:deep(.lockable-field.is-locked .el-textarea__inner),
+:deep(.lockable-field.is-locked .el-input__wrapper) {
+  background: color-mix(in srgb, var(--rb-primary-bg) 55%, var(--rb-bg-surface));
+  box-shadow: inset 2px 0 0 var(--rb-primary-light);
+}.detail-section { position: relative; }.detail-section :deep(textarea) { line-height: 1.8; font-family: var(--rb-font); }.field-help { margin: 9px 0 0; color: var(--rb-text-muted); font-size: 12px; line-height: 1.6; }.structured-json :deep(textarea) { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; line-height: 1.55; }.secret-section { background: color-mix(in srgb, var(--rb-primary-bg) 35%, transparent); margin: 0 -10px; padding: 16px 10px; border-radius: 10px; }.empty-dossier { display: grid; place-content: center; text-align: center; padding: 40px; }.empty-dossier :deep(.el-icon) { font-size: 42px; color: var(--rb-primary); margin: auto; }.empty-dossier h2 { margin: 15px 0 7px; }.empty-dossier p { color: var(--rb-text-secondary); margin: 0 0 18px; }
 .relationship-panel { margin-top: 16px; padding: 20px; }.relationship-head h2 { margin: 0; font-size: 20px; }.relationship-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }.relationship-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 10px; margin-top: 15px; }.relationship-card { border: 1px solid var(--rb-border-light); border-radius: 10px; padding: 14px; cursor: pointer; transition: .15s ease; }.relationship-card:hover { border-color: var(--rb-primary); transform: translateY(-1px); }.relationship-path { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }.relationship-card p { min-height: 40px; margin: 10px 0; line-height: 1.5; color: var(--rb-text-secondary); font-size: 13px; }.expand-hint { margin: 0 0 14px; color: var(--rb-text-secondary); line-height: 1.6; }.expand-options { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (max-width: 900px) { .workbench-grid { grid-template-columns: 1fr; }.entity-roster { max-height: 260px; }.identity-row, .field-grid { grid-template-columns: 1fr; }.page-header, .dossier-top { flex-direction: column; }.entity-dossier { padding: 18px; } }
 </style>

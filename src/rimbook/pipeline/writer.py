@@ -324,7 +324,11 @@ class Writer:
 
             messages = self.llm.as_chat(system=self.prompts.writer_revise_system, user=user)
             with self.trace.begin("revise", project=self.project_name, chapter=number) as t:
-                gen = self.llm.generate(messages, temperature=0.7)
+                gen = self.llm.generate(
+                    messages,
+                    temperature=self.generation.temperature,
+                    max_tokens=self.generation.max_tokens,
+                )
                 t.record(messages, gen)
             revised = gen.content.strip()
 

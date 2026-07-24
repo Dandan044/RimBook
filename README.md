@@ -256,7 +256,7 @@ title: 我的小说
 author: 作者
 language: zh
 generation:
-  temperature: 0.85
+  temperature: 1.0
   max_tokens: 4000
   recent_window_chapters: 1
   summary_history: 6

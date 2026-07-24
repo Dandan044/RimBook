@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..codex.models import VALID_TYPES
+from .completeness import incomplete_entry_fields
+from .identity import NameRegistry
 from .models import (
     PlanningCodexChanges,
     PlanningCodexEntry,
@@ -99,19 +101,84 @@ class PlanningCodexService:
         result = ReconcileResult()
         entries = {e.id: e for e in self.store.list_entries()}
         relationships = {r.id: r for r in self.store.list_relationships()}
+        registry = NameRegistry.from_entries(entries.values())
 
         for proposal in changes.entries:
             existing = entries.get(proposal.id)
             if existing is None:
+                entry_type = (proposal.type or "").strip()
+                if entry_type not in VALID_TYPES:
+                    result.warnings.append(
+                        f"跳过新建 {proposal.id}：缺少有效 type"
+                        f"（得到 {proposal.type!r}），需先补全字段"
+                    )
+                    continue
+                proposed_name = (proposal.name or "").strip()
+                if not proposed_name:
+                    result.warnings.append(f"跳过新建 {proposal.id}：缺少 name")
+                    continue
+                if proposed_name:
+                    match_id = registry.find_match(proposed_name, entry_type)
+                    if match_id:
+                        existing = entries[match_id]
+                        result.warnings.append(
+                            f"名称“{proposed_name}”与已有 {match_id} 匹配，"
+                            f"已合并提案 {proposal.id} 而非新建"
+                        )
+                        # Preserve alternate id/name as aliases on the canonical entry
+                        extra_aliases = [
+                            value
+                            for value in (proposed_name, proposal.id)
+                            if value
+                            and value != existing.name
+                            and value not in existing.aliases
+                            and value != match_id
+                        ]
+                        merge_proposal = proposal.model_copy(update={"id": match_id})
+                        if extra_aliases:
+                            merged_aliases = list(
+                                dict.fromkeys(
+                                    [
+                                        *(existing.aliases or []),
+                                        *(proposal.aliases or []),
+                                        *extra_aliases,
+                                    ]
+                                )
+                            )
+                            merge_proposal = merge_proposal.model_copy(
+                                update={"aliases": merged_aliases}
+                            )
+                        if self._merge_entry(existing, merge_proposal, result):
+                            existing.source = source
+                            self.store.save_entry(existing)
+                            result.updated_entries.append(existing.id)
+                        registry.add_entry(existing)
+                        continue
+                    # Cross-type name collision: refuse create
+                    cross = [
+                        owner
+                        for owner in registry.owners_of(proposed_name)
+                        if owner.entry_type != entry_type
+                    ]
+                    if cross:
+                        owner = cross[0]
+                        result.warnings.append(
+                            f"跳过新建 {proposal.id}（{proposed_name}）："
+                            f"姓名已被 {owner.entry_id}（{owner.display}/"
+                            f"{owner.entry_type}）占用"
+                        )
+                        continue
                 entry = self._new_entry(proposal, source)
                 self.store.save_entry(entry)
                 entries[entry.id] = entry
+                registry.add_entry(entry)
                 result.created_entries.append(entry.id)
                 continue
             if self._merge_entry(existing, proposal, result):
                 existing.source = source
                 self.store.save_entry(existing)
                 result.updated_entries.append(existing.id)
+                registry.add_entry(existing)
 
         for proposal in changes.relationships:
             existing = relationships.get(proposal.id)
@@ -155,6 +222,18 @@ class PlanningCodexService:
         proposals: list[PlanningCodexProposal] = []
         for item in raw_entries:
             if not isinstance(item, dict):
+                continue
+            # Safety net: never invent type=character for blank type.
+            missing = incomplete_entry_fields(
+                item, require_existence=require_existence,
+            )
+            # Allow exists_at_anchor=false path to proceed even if formation
+            # fields are being rewritten below; still require id/name/type.
+            critical = [f for f in missing if f in {"id", "name", "type"}]
+            if critical:
+                result.warnings.append(
+                    f"跳过不完整设定 {item.get('id', '?')}：缺少 {', '.join(critical)}"
+                )
                 continue
             if require_existence and item.get("exists_at_anchor") is not True:
                 if item.get("type") == "timeline":
@@ -415,6 +494,10 @@ class PlanningCodexService:
                     f"- [{entry.type}] {entry.id}（{entry.name}）：{excerpt or '仅有粗略设定'}"
                 )
             blocks.append("\n".join(lines))
+        occupied = NameRegistry.from_entries(all_entries).render_occupied_block(
+            max_chars=2200,
+        )
+        blocks.append(occupied)
         return "\n\n".join(blocks)[:max_chars]
 
     def detail_quality_issues(
@@ -468,7 +551,17 @@ class PlanningCodexService:
                     issues.append(f"把尚未发生的“{event.name}”写成了既成事实")
                     break
                 start = index + len(label)
+        # Cross-entry real-name / 本名 collisions
+        issues.extend(
+            NameRegistry.from_store(self.store).real_name_conflicts(entry_id, detail)
+        )
         return issues
+
+    def occupied_names_block(self, *, max_chars: int = 3500) -> str:
+        """Render occupied-name prompt block from the current planning store."""
+        return NameRegistry.from_store(self.store).render_occupied_block(
+            max_chars=max_chars,
+        )
 
     def render_brief(
         self,
@@ -529,15 +622,20 @@ class PlanningCodexService:
             )
         return "\n".join(lines)
 
-    def render_index(self, *, max_per_type: int = 12) -> str:
+    def render_index(self, *, max_per_type: int = 40) -> str:
         """Compact index of all entry ids grouped by type."""
         lines: list[str] = []
         for entry_type in VALID_TYPES:
-            items = self.store.list_entries(entry_type)[:max_per_type]
-            if not items:
+            items = self.store.list_entries(entry_type)
+            total = len(items)
+            shown = items[:max_per_type]
+            if not shown:
                 continue
             label = _TYPE_LABELS.get(entry_type, entry_type)
-            lines.append(f"{label}：" + "、".join(f"{e.id}({e.name})" for e in items))
+            joined = "、".join(f"{e.id}({e.name})" for e in shown)
+            if total > max_per_type:
+                joined += f"…等共{total}条"
+            lines.append(f"{label}：" + joined)
         return "\n".join(lines) if lines else "（空）"
 
     def build_graph(
@@ -686,8 +784,14 @@ class PlanningCodexService:
     def _new_entry(proposal: PlanningCodexProposal, source: str) -> PlanningCodexEntry:
         fields = proposal.model_dump(exclude_none=True)
         fields.pop("id", None)
-        entry_type = fields.pop("type", None) or "character"
-        name = fields.pop("name", None) or proposal.id
+        entry_type = str(fields.pop("type", None) or "").strip()
+        if entry_type not in VALID_TYPES:
+            raise ValueError(
+                f"新建设定 {proposal.id!r} 缺少有效 type，得到 {entry_type!r}"
+            )
+        name = str(fields.pop("name", None) or "").strip()
+        if not name:
+            raise ValueError(f"新建设定 {proposal.id!r} 缺少 name")
         return PlanningCodexEntry(
             id=proposal.id,
             name=name,

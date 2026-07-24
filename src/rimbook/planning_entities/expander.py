@@ -10,6 +10,7 @@ import yaml
 from pydantic import BaseModel, Field, field_validator
 
 from ..versioning import atomic_write
+from .identity import NameRegistry, normalize_name
 from .models import PlanningCodexChanges, RelationshipProposal
 from .service import PlanningCodexService, ReconcileResult
 
@@ -188,26 +189,33 @@ class WorldExpander:
         self,
         candidates: list[ExpansionCandidate],
     ) -> tuple[list[ExpansionCandidate], list[str]]:
+        from .identity import core_name
+
         entries = self.store.list_entries()
         by_id = {entry.id: entry for entry in entries}
-        by_identity: dict[tuple[str, str], str] = {}
-        for entry in entries:
-            for value in [entry.name, *entry.aliases]:
-                by_identity[(entry.type, _normalize_name(value))] = entry.id
+        registry = NameRegistry.from_entries(entries)
 
         accepted: list[ExpansionCandidate] = []
         warnings: list[str] = []
-        seen_candidates: set[tuple[str, str]] = set()
+        seen_exact: set[tuple[str, str]] = set()
+        seen_cores: set[tuple[str, str]] = set()
         for candidate in candidates:
-            identity = (candidate.type, _normalize_name(candidate.name))
+            exact_key = (candidate.type, normalize_name(candidate.name))
+            core_key = (candidate.type, core_name(candidate.name))
+
             if candidate.provisional_id in by_id:
                 candidate.existing_match_id = candidate.provisional_id
-            elif identity in by_identity:
-                candidate.existing_match_id = by_identity[identity]
-            if identity in seen_candidates:
+            else:
+                match_id = registry.find_match(candidate.name, candidate.type)
+                if match_id:
+                    candidate.existing_match_id = match_id
+
+            if exact_key in seen_exact or (core_key[1] and core_key in seen_cores):
                 warnings.append(f"跳过重复候选: {candidate.name}")
                 continue
-            seen_candidates.add(identity)
+            seen_exact.add(exact_key)
+            if core_key[1]:
+                seen_cores.add(core_key)
             accepted.append(candidate)
         return accepted, warnings
 
@@ -324,10 +332,6 @@ def _merge_results(target: ReconcileResult, source: ReconcileResult) -> None:
         "warnings",
     ):
         getattr(target, field_name).extend(getattr(source, field_name))
-
-
-def _normalize_name(value: str) -> str:
-    return re.sub(r"[\W_]+", "", value.strip().casefold())
 
 
 def _slug(value: str) -> str:

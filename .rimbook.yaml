@@ -7,4 +7,4 @@ llm:
     model: BAAI/bge-m3
     api_key: sk-glnsforuahxkjbxpyvojniplbxmppbgszwhvfulyldspukrk
   check_model: deepseek-v4-flash
-  reasoning_effort: null
+  reasoning_effort: low

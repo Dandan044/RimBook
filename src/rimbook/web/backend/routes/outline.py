@@ -108,12 +108,6 @@ class VolumeOutlineOut(BaseModel):
     ending: str
 
 
-class VolumePlanOut(BaseModel):
-    volume: VolumeOutlineOut
-    chapters: list[ChapterOutlineOut]
-    warnings: list[str] = []
-
-
 class SynopsisIn(BaseModel):
     text: str
 
@@ -126,10 +120,6 @@ class PlanChapterRequest(BaseModel):
     volume: int | None = None
     title: str = ""
     hint: str = ""
-
-
-class PlanVolumeRequest(BaseModel):
-    title: str = ""
 
 
 # ---- synopsis ----
@@ -411,30 +401,7 @@ def list_volumes(deps: ProjectDeps = Depends(get_project_deps)) -> list[VolumeOu
     return [_vol_out(v) for v in vols]
 
 
-@router.post("/volumes", response_model=VolumePlanOut)
-def plan_volume(req: PlanVolumeRequest, deps: ProjectDeps = Depends(get_project_deps)) -> VolumePlanOut:
-    """LLM-plan a new volume and all chapter beats in one conversation."""
-    existing = deps.outline.list_volumes()
-    number = max((v.number for v in existing), default=0) + 1
-    if deps.outline.read_volume(number) is not None:
-        raise HTTPException(status_code=409, detail=f"第 {number} 卷已存在，禁止重复规划")
-    task_registry.register(deps.project_dir.name, "plan_volume", number, "正在规划卷及全部章节…")
-    try:
-        result = deps.planner.plan_volume(number, title=req.title)
-        return VolumePlanOut(
-            volume=_vol_out(result.volume),
-            chapters=[_ch_out(c, deps.paths) for c in result.chapters],
-            warnings=result.warnings,
-        )
-    except FileExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
-    finally:
-        task_registry.unregister(deps.project_dir.name, "plan_volume", number)
-
-
-# ---- volume planning v2 (beat chain → refine → assemble) ----
+# ---- volume planning (beat chain → refine → assemble) ----
 
 class PlanVolumeV2Request(BaseModel):
     title: str = ""

@@ -491,7 +491,7 @@ async function loadProjectConfig() {
       author: data.author || '',
       language: data.language || 'zh',
       generation: data.generation || {
-        temperature: 0.85, max_tokens: 50000, top_p: 1.0,
+        temperature: 1.0, max_tokens: 50000, top_p: 1.0,
         recent_window_chapters: 1, summary_history: 6,
         auto_consistency_check: true, auto_fix: false, max_fix_rounds: 2,
         auto_checkpoint: true, max_checkpoints: 50,

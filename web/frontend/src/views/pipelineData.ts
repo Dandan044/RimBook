@@ -27,7 +27,10 @@ export const STAGES: Record<string, StageMeta> = {
     llmPrompts: [
       'synopsis_system + synopsis_user',
       'volume_system + volume_user',
-      'volume_chapters_system + volume_chapters_user',
+      'volume_cast_system + volume_cast_user',
+      'volume_beats_system + volume_beats_user',
+      'beat_assemble_system + beat_assemble_user',
+      'beat_refine_system + beat_refine_user',
       'chapter_outline_system + chapter_outline_user',
     ],
   },

@@ -358,17 +358,8 @@ export const updateSynopsis = (projectId: string, text: string) =>
 export const generateSynopsis = (projectId: string, premise: string) =>
   http.post<{ text: string }>(`/projects/${projectId}/outline/synopsis`, { text: premise }).then(r => r.data)
 
-export interface VolumePlanResult {
-  volume: VolumeOutline
-  chapters: ChapterOutline[]
-  warnings?: string[]
-}
-
 export const listVolumes = (projectId: string) =>
   http.get<VolumeOutline[]>(`/projects/${projectId}/outline/volumes`).then(r => r.data)
-
-export const planVolume = (projectId: string, title?: string) =>
-  http.post<VolumePlanResult>(`/projects/${projectId}/outline/volumes`, { title: title || '' }).then(r => r.data)
 
 export const updateVolume = (projectId: string, number: number, data: Partial<VolumeOutline>) =>
   http.put<VolumeOutline>(`/projects/${projectId}/outline/volumes/${number}`, data).then(r => r.data)
